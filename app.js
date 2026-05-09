@@ -308,7 +308,7 @@
     }
     state.processing = true;
     drawCameraFrame(true);
-    setStatus(`正在识别${sourceName}：先找选择题外框四角并截取...`);
+    setStatus(`正在识别${sourceName}：先定位选择题选项区域...`);
     await nextFrame();
 
     const startedAt = performance.now();
@@ -332,7 +332,7 @@
     } catch (error) {
       const message = cleanMessage(error);
       clearCurrentOutput();
-      setStatus(message.includes("完整选择题") ? message : `识别失败：${message}`, message.includes("完整选择题") ? "warn" : "bad");
+      setStatus(message.includes("选择题") ? message : `识别失败：${message}`, message.includes("选择题") ? "warn" : "bad");
     } finally {
       state.processing = false;
       drawCameraFrame(false);
@@ -399,34 +399,7 @@
       return cornerOutput;
     }
 
-    let detail = "";
-    try {
-      const fastOutput = grade(sourceCanvas, answerKeyText, scoreRuleText, {
-        inputMaxDimension: FAST_INPUT_MAX_DIMENSION,
-        maxCandidates: 3,
-        fastCamera: true
-      });
-      if (isFastCameraResult(fastOutput)) {
-        fastOutput.fastMode = true;
-        return fastOutput;
-      }
-      detail = fastOutput && fastOutput.sheetValidation ? `（${fastOutput.sheetValidation.summary}）` : "";
-    } catch (error) {
-      const message = cleanMessage(error);
-      detail = message.includes("完整选择题外框") ? "" : `（${message}）`;
-    }
-    throw new Error(`未检测到完整选择题外框，请把选择题区域四个角完整放进取景框${detail}`);
-  }
-
-  function isFastCameraResult(output) {
-    if (!output || !output.sheetValidation || output.sheetValidation.lowConfidence) {
-      return false;
-    }
-    const grid = output.sheetValidation.grid;
-    return output.recognizedCount >= 55
-      && grid.questionCoverage >= 0.70
-      && grid.boxCoverage >= 0.52
-      && grid.averageScore >= 0.10;
+    throw new Error("未稳定识别到选择题选项，请让 1-55 题尽量完整、清晰地出现在画面中");
   }
 
   function gradeWithFrameCorners(sourceCanvas, answerKeyText, scoreRuleText) {
@@ -461,14 +434,15 @@
         fastOutput.cornerMode = candidate.note.includes("frame-corners");
         fastOutput.fastMode = true;
         fastOutput.fastCropNote = candidate.note;
-
-        if (isCornerFrameResult(fastOutput) && !fastOutput.sheetValidation.lowConfidence) {
+        if (isCornerFrameResult(fastOutput)) {
           const quality = outputQuality(fastOutput, fastScored) + (candidate.priority || 0) * 0.35;
           if (quality > bestQuality) {
             bestOutput = fastOutput;
             bestQuality = quality;
           }
-          continue;
+          if (!fastOutput.sheetValidation.lowConfidence) {
+            continue;
+          }
         }
 
         if (!isFastCropRefinementCandidate(fastOutput)) {
@@ -481,7 +455,6 @@
         output.cornerMode = candidate.note.includes("frame-corners");
         output.fastMode = true;
         output.fastCropNote = candidate.note;
-
         const quality = outputQuality(output, scored) + (candidate.priority || 0) * 0.35;
         if (isCornerFrameResult(output) && quality > bestQuality) {
           bestOutput = output;
@@ -609,7 +582,7 @@
 
     if (!bestOutput) {
       const detail = bestRejected ? `（${bestRejected.output.sheetValidation.summary}）` : "";
-      throw new Error(`未检测到完整选择题外框，请把选择题区域四个角完整放进取景框${detail}`);
+      throw new Error(`未稳定识别到选择题选项，请让 1-55 题尽量完整、清晰地出现在画面中${detail}`);
     }
     bestOutput.processedCandidates = processedCandidates;
     return bestOutput;
