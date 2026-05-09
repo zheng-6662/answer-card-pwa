@@ -28,6 +28,7 @@
   const MIN_GRID_QUESTION_COVERAGE = 0.62;
   const MIN_GRID_BOX_COVERAGE = 0.36;
   const MIN_GRID_AVERAGE_SCORE = 0.08;
+  const CHOICE_REGION_PRIORITY = 900;
 
   const BLOCKS = [
     { startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 },
@@ -307,11 +308,29 @@
       throw new Error("没有找到有效图像");
     }
 
-    const shortlist = [];
+    const scoredCandidates = [];
     for (const candidate of candidates) {
       const gray = new GrayImage(candidate.canvas);
       const global = findGlobalAlignment(gray);
-      insertShortlist({ candidate, gray, global, quickQuality: global.quality }, shortlist, 2);
+      scoredCandidates.push({ candidate, gray, global, quickQuality: global.quality + (candidate.priority || 0) });
+    }
+    scoredCandidates.sort((a, b) => b.quickQuality - a.quickQuality);
+
+    const shortlist = [];
+    for (const scored of scoredCandidates.slice(0, 8)) {
+      pushUniqueScored(shortlist, scored);
+    }
+    let baselineCount = 0;
+    for (const scored of scoredCandidates) {
+      if ((scored.candidate.priority || 0) !== 0) {
+        continue;
+      }
+      if (pushUniqueScored(shortlist, scored)) {
+        baselineCount += 1;
+      }
+      if (baselineCount >= 6 || shortlist.length >= 14) {
+        break;
+      }
     }
 
     let bestOutput = null;
@@ -407,8 +426,25 @@
   function buildCandidates(sourceCanvas) {
     const fitted = fitCanvas(sourceCanvas, 1800);
     const candidates = [];
+    const sourcePortrait = fitted.height > fitted.width * 1.12;
     for (const degrees of preferredRotations(fitted)) {
       const rotated = rotateCanvas(fitted, degrees);
+      const choiceOnlyPass = sourcePortrait && (degrees === 0 || degrees === 180);
+
+      const choiceRegions = findChoiceRegionCrops(rotated);
+      for (const region of choiceRegions) {
+        addCanonicalCandidate(
+          region.canvas,
+          `rot=${degrees} choice=${region.x},${region.y} ${region.width}x${region.height}`,
+          candidates,
+          CHOICE_REGION_PRIORITY + Math.round(region.score * 120)
+        );
+      }
+
+      if (choiceOnlyPass) {
+        continue;
+      }
+
       addCanonicalCandidate(rotated, `rot=${degrees} full`, candidates);
 
       const cropped = autoCrop(rotated);
@@ -428,7 +464,7 @@
     const width = canvas.width;
     const height = canvas.height;
     if (height > width * 1.12) {
-      return [90, 270];
+      return [0, 180, 90, 270];
     }
     if (width > height * 1.12) {
       return [0, 180];
@@ -459,14 +495,232 @@
     }
   }
 
-  function addCanonicalCandidate(canvas, note, candidates) {
+  function addCanonicalCandidate(canvas, note, candidates, priority = 0) {
     if (!canvas || canvas.width < 80 || canvas.height < 80) {
       return;
     }
     candidates.push({
       canvas: resizeCanvas(canvas, CANONICAL_WIDTH, CANONICAL_HEIGHT),
-      note
+      note,
+      priority
     });
+  }
+
+  function findChoiceRegionCrops(canvas) {
+    let gray;
+    try {
+      gray = new GrayImage(canvas);
+    } catch {
+      return [];
+    }
+
+    const rows = findLongHorizontalLines(gray);
+    const regions = [];
+    const minHeight = gray.height * 0.18;
+    const maxHeight = gray.height * 0.58;
+
+    for (let i = 0; i < rows.length; i += 1) {
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const top = rows[i];
+        const bottom = rows[j];
+        const height = bottom.y - top.y;
+        if (height < minHeight || height > maxHeight) {
+          continue;
+        }
+
+        const bounds = estimateChoiceRegionBounds(gray, top.y, bottom.y);
+        if (!bounds) {
+          continue;
+        }
+
+        const width = bounds.x2 - bounds.x1 + 1;
+        const aspect = width / height;
+        if (aspect < 1.55 || aspect > 2.85) {
+          continue;
+        }
+
+        const aspectScore = 1 - Math.min(1, Math.abs(aspect - TARGET_ASPECT) / 0.75);
+        const verticalScore = (bounds.leftScore + bounds.rightScore) / 2;
+        const horizontalScore = (top.score + bottom.score) / 2;
+        const optionScore = quickChoiceRegionOptionScore(gray, bounds.x1, top.y, bounds.x2, bottom.y);
+        const score = horizontalScore * 1.2 + verticalScore + aspectScore + optionScore * 2.2;
+
+        const padX = Math.max(6, Math.round(width * 0.012));
+        const padY = Math.max(6, Math.round(height * 0.018));
+        const x = clamp(bounds.x1 - padX, 0, gray.width - 1);
+        const y = clamp(top.y - padY, 0, gray.height - 1);
+        const x2 = clamp(bounds.x2 + padX, x + 1, gray.width - 1);
+        const y2 = clamp(bottom.y + padY, y + 1, gray.height - 1);
+
+        regions.push({
+          x,
+          y,
+          width: x2 - x + 1,
+          height: y2 - y + 1,
+          score,
+          canvas: cropCanvas(canvas, x, y, x2 - x + 1, y2 - y + 1)
+        });
+      }
+    }
+
+    regions.sort((a, b) => b.score - a.score);
+    return dedupeRegions(regions).slice(0, 4);
+  }
+
+  function findLongHorizontalLines(gray) {
+    const threshold = Math.min(130, Math.max(82, gray.otsuThreshold() - 8));
+    const rows = [];
+    let group = null;
+    for (let y = 0; y < gray.height; y += 2) {
+      const rect = {
+        x1: Math.round(gray.width * 0.035),
+        y1: y,
+        x2: Math.round(gray.width * 0.965),
+        y2: Math.min(gray.height - 1, y + 3)
+      };
+      const score = gray.fractionBelow(rect, threshold);
+      if (score >= 0.16) {
+        if (!group) {
+          group = { y, score, count: 1 };
+        } else {
+          group.count += 1;
+          if (score > group.score) {
+            group.y = y;
+            group.score = score;
+          }
+        }
+      } else if (group) {
+        rows.push(group);
+        group = null;
+      }
+    }
+    if (group) {
+      rows.push(group);
+    }
+    return rows
+      .filter((row) => row.count >= 1)
+      .sort((a, b) => a.y - b.y)
+      .slice(0, 24);
+  }
+
+  function estimateChoiceRegionBounds(gray, topY, bottomY) {
+    const threshold = Math.min(130, Math.max(82, gray.otsuThreshold() - 8));
+    const height = bottomY - topY;
+    const y1 = clamp(topY + Math.round(height * 0.04), 0, gray.height - 1);
+    const y2 = clamp(bottomY - Math.round(height * 0.04), y1 + 1, gray.height - 1);
+    const leftSearchEnd = Math.round(gray.width * 0.34);
+    const rightSearchStart = Math.round(gray.width * 0.66);
+    const left = strongestVerticalInRange(gray, 0, leftSearchEnd, y1, y2, threshold);
+    const right = strongestVerticalInRange(gray, rightSearchStart, gray.width - 1, y1, y2, threshold);
+
+    let x1 = left.x;
+    let x2 = right.x;
+    let leftScore = left.score;
+    let rightScore = right.score;
+
+    if (leftScore < 0.06 || rightScore < 0.06 || x2 <= x1) {
+      const darkBounds = darkColumnBounds(gray, topY, bottomY, threshold);
+      if (!darkBounds) {
+        return null;
+      }
+      x1 = darkBounds.x1;
+      x2 = darkBounds.x2;
+      leftScore = Math.max(leftScore, darkBounds.leftScore);
+      rightScore = Math.max(rightScore, darkBounds.rightScore);
+    }
+
+    if (x2 - x1 < gray.width * 0.45) {
+      return null;
+    }
+    return { x1, x2, leftScore, rightScore };
+  }
+
+  function strongestVerticalInRange(gray, xStart, xEnd, y1, y2, threshold) {
+    let best = { x: xStart, score: 0 };
+    const start = clamp(xStart, 0, gray.width - 1);
+    const end = clamp(xEnd, start, gray.width - 1);
+    for (let x = start; x <= end; x += 2) {
+      const rect = {
+        x1: x,
+        y1,
+        x2: Math.min(gray.width - 1, x + 3),
+        y2
+      };
+      const score = gray.fractionBelow(rect, threshold);
+      if (score > best.score) {
+        best = { x, score };
+      }
+    }
+    return best;
+  }
+
+  function darkColumnBounds(gray, topY, bottomY, threshold) {
+    const y1 = clamp(topY, 0, gray.height - 1);
+    const y2 = clamp(bottomY, y1 + 1, gray.height - 1);
+    const scores = [];
+    for (let x = 0; x < gray.width; x += 4) {
+      const score = gray.fractionBelow({ x1: x, y1, x2: Math.min(gray.width - 1, x + 3), y2 }, threshold);
+      scores.push({ x, score });
+    }
+    const strong = scores.filter((item) => item.score >= 0.035);
+    if (!strong.length) {
+      return null;
+    }
+    const x1 = strong[0].x;
+    const x2 = strong[strong.length - 1].x;
+    return {
+      x1,
+      x2,
+      leftScore: strong[0].score,
+      rightScore: strong[strong.length - 1].score
+    };
+  }
+
+  function quickChoiceRegionOptionScore(gray, x1, y1, x2, y2) {
+    const width = x2 - x1 + 1;
+    const height = y2 - y1 + 1;
+    if (width <= 0 || height <= 0) {
+      return 0;
+    }
+    const threshold = Math.min(145, Math.max(85, gray.mean({ x1, y1, x2, y2 }) - 42));
+    const sampleRows = [0.16, 0.31, 0.47, 0.64, 0.80];
+    const sampleCols = [0.09, 0.27, 0.45, 0.63, 0.81];
+    let hits = 0;
+    let total = 0;
+    for (const fy of sampleRows) {
+      for (const fx of sampleCols) {
+        const cx = Math.round(x1 + width * fx);
+        const cy = Math.round(y1 + height * fy);
+        const rect = rectI(cx, cy, 24, 14, gray.width, gray.height);
+        const dark = gray.fractionBelow(rect, threshold);
+        total += 1;
+        if (dark >= 0.035 && dark <= 0.55) {
+          hits += 1;
+        }
+      }
+    }
+    return total ? hits / total : 0;
+  }
+
+  function dedupeRegions(regions) {
+    const result = [];
+    for (const region of regions) {
+      const duplicate = result.some((kept) => {
+        const ix1 = Math.max(region.x, kept.x);
+        const iy1 = Math.max(region.y, kept.y);
+        const ix2 = Math.min(region.x + region.width, kept.x + kept.width);
+        const iy2 = Math.min(region.y + region.height, kept.y + kept.height);
+        const iw = Math.max(0, ix2 - ix1);
+        const ih = Math.max(0, iy2 - iy1);
+        const intersection = iw * ih;
+        const smaller = Math.min(region.width * region.height, kept.width * kept.height);
+        return smaller > 0 && intersection / smaller > 0.72;
+      });
+      if (!duplicate) {
+        result.push(region);
+      }
+    }
+    return result;
   }
 
   function autoCrop(canvas) {
@@ -849,15 +1103,12 @@
     return second;
   }
 
-  function insertShortlist(scored, shortlist, limit) {
-    let index = 0;
-    while (index < shortlist.length && shortlist[index].quickQuality >= scored.quickQuality) {
-      index += 1;
+  function pushUniqueScored(list, scored) {
+    if (list.some((item) => item.candidate === scored.candidate)) {
+      return false;
     }
-    shortlist.splice(index, 0, scored);
-    while (shortlist.length > limit) {
-      shortlist.pop();
-    }
+    list.push(scored);
+    return true;
   }
 
   class GrayImage {
