@@ -11,7 +11,7 @@
   const MIN_MARK_SCORE = 0.22;
   const MIN_CONFIDENCE = 0.06;
   const TARGET_ASPECT = CANONICAL_WIDTH / CANONICAL_HEIGHT;
-  const SCAN_INTERVAL_MS = 900;
+  const SCAN_INTERVAL_MS = 650;
   const PRESET_ANSWER_GROUPS = [
     "1-5 CBAAC",
     "6-10 CCAAC",
@@ -40,6 +40,8 @@
   const INPUT_MAX_DIMENSION = 1800;
   const FAST_INPUT_MAX_DIMENSION = 1800;
   const CAMERA_FRAME_MAX_DIMENSION = 1400;
+  const CORNER_INPUT_MAX_DIMENSION = 1600;
+  const CORNER_MIN_RECOGNIZED = 54;
 
   const BLOCKS = [
     scaleBlock({ startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 }),
@@ -184,7 +186,7 @@
       state.scanning = true;
       hideSuccessPanel();
       el.cameraEmpty.classList.add("hidden");
-      setStatus("扫描中：把选择题区域放进取景框，程序会先自动截取再识别。");
+      setStatus("扫描中：把选择题外框四个角都放进取景框，程序会先找外框截取再识别。");
       drawCameraFrame();
       scheduleScan(250);
     } catch (error) {
@@ -305,7 +307,7 @@
     }
     state.processing = true;
     drawCameraFrame(true);
-    setStatus(`正在识别${sourceName}：先截取取景框和选择题区域...`);
+    setStatus(`正在识别${sourceName}：先找选择题外框四角并截取...`);
     await nextFrame();
 
     const startedAt = performance.now();
@@ -319,7 +321,7 @@
       renderQuestions(output.questions);
       el.saveResultButton.disabled = false;
       const elapsed = Math.round(performance.now() - startedAt);
-      const modeText = output.fastMode ? "快速模式，" : "";
+      const modeText = output.cornerMode ? "四角定位模式，" : output.fastMode ? "快速模式，" : "";
       if (output.sheetValidation.lowConfidence) {
         setStatus(`低置信度出分：${modeText}${output.sheetValidation.summary}，请抽查预览框是否对齐，耗时 ${elapsed}ms`, "warn");
       } else {
@@ -389,6 +391,14 @@
   }
 
   function gradeCameraFrame(sourceCanvas, answerKeyText, scoreRuleText) {
+    const cornerOutput = gradeWithFrameCorners(sourceCanvas, answerKeyText, scoreRuleText);
+    if (cornerOutput) {
+      cornerOutput.cornerMode = true;
+      cornerOutput.fastMode = true;
+      return cornerOutput;
+    }
+
+    let detail = "";
     try {
       const fastOutput = grade(sourceCanvas, answerKeyText, scoreRuleText, {
         inputMaxDimension: FAST_INPUT_MAX_DIMENSION,
@@ -399,10 +409,12 @@
         fastOutput.fastMode = true;
         return fastOutput;
       }
-    } catch {
-      // Fall through to full recognition. Fast mode is only an optimization.
+      detail = fastOutput && fastOutput.sheetValidation ? `（${fastOutput.sheetValidation.summary}）` : "";
+    } catch (error) {
+      const message = cleanMessage(error);
+      detail = message.includes("完整选择题外框") ? "" : `（${message}）`;
     }
-    return grade(sourceCanvas, answerKeyText, scoreRuleText);
+    throw new Error(`未检测到完整选择题外框，请把选择题区域四个角完整放进取景框${detail}`);
   }
 
   function isFastCameraResult(output) {
@@ -414,6 +426,104 @@
       && grid.questionCoverage >= 0.70
       && grid.boxCoverage >= 0.52
       && grid.averageScore >= 0.10;
+  }
+
+  function gradeWithFrameCorners(sourceCanvas, answerKeyText, scoreRuleText) {
+    const answerKey = parseAnswerKey(answerKeyText);
+    const pointValues = parseScoreRules(scoreRuleText, QUESTION_COUNT);
+    const fitted = fitCanvas(sourceCanvas, CORNER_INPUT_MAX_DIMENSION);
+    let bestOutput = null;
+    let bestQuality = -Infinity;
+
+    for (const degrees of preferredRotations(fitted)) {
+      const rotated = rotateCanvas(fitted, degrees);
+      const candidates = [];
+      const regions = findChoiceRegionCrops(rotated).slice(0, 4);
+      for (const region of regions) {
+        addCanonicalCandidate(
+          region.canvas,
+          `rot=${degrees} frame-corners=${region.x},${region.y} ${region.width}x${region.height}`,
+          candidates,
+          1300 + Math.round(region.score * 160)
+        );
+      }
+      addPaperLayoutCandidates(rotated, degrees, candidates);
+
+      const ordered = candidates
+        .slice()
+        .sort((a, b) => (b.priority || 0) - (a.priority || 0))
+        .slice(0, 5);
+      for (const candidate of ordered) {
+        const fastScored = scoreCandidate(candidate, { fastAlignment: true });
+        const fastOutput = gradeCanonical(fastScored.candidate, fastScored.gray, fastScored.global, answerKey, pointValues, { fastAlignment: true });
+        fastOutput.sheetValidation = evaluateSheet(fastScored.gray, fastOutput, { cornerMode: candidate.note.includes("frame-corners") });
+        fastOutput.cornerMode = candidate.note.includes("frame-corners");
+        fastOutput.fastMode = true;
+        fastOutput.fastCropNote = candidate.note;
+
+        if (isCornerFrameResult(fastOutput) && !fastOutput.sheetValidation.lowConfidence) {
+          const quality = outputQuality(fastOutput, fastScored) + (candidate.priority || 0) * 0.35;
+          if (quality > bestQuality) {
+            bestOutput = fastOutput;
+            bestQuality = quality;
+          }
+          continue;
+        }
+
+        if (!isFastCropRefinementCandidate(fastOutput)) {
+          continue;
+        }
+
+        const scored = scoreCandidate(candidate);
+        const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues);
+        output.sheetValidation = evaluateSheet(scored.gray, output, { cornerMode: candidate.note.includes("frame-corners") });
+        output.cornerMode = candidate.note.includes("frame-corners");
+        output.fastMode = true;
+        output.fastCropNote = candidate.note;
+
+        const quality = outputQuality(output, scored) + (candidate.priority || 0) * 0.35;
+        if (isCornerFrameResult(output) && quality > bestQuality) {
+          bestOutput = output;
+          bestQuality = quality;
+        }
+      }
+
+      if (bestOutput && !bestOutput.sheetValidation.lowConfidence) {
+        bestOutput.processedCandidates = 1;
+        return bestOutput;
+      }
+    }
+
+    if (bestOutput) {
+      bestOutput.processedCandidates = 1;
+    }
+    return bestOutput;
+  }
+
+  function isFastCropRefinementCandidate(output) {
+    if (!output || !output.sheetValidation) {
+      return false;
+    }
+    const grid = output.sheetValidation.grid;
+    return output.recognizedCount >= 52
+      && output.sheetValidation.pageMean >= 118
+      && output.sheetValidation.darkFraction <= 0.42
+      && grid.questionCoverage >= 0.62
+      && grid.boxCoverage >= 0.48
+      && grid.averageScore >= 0.09;
+  }
+
+  function isCornerFrameResult(output) {
+    if (!output || !output.sheetValidation || !output.sheetValidation.valid) {
+      return false;
+    }
+    const grid = output.sheetValidation.grid;
+    return output.recognizedCount >= CORNER_MIN_RECOGNIZED
+      && output.sheetValidation.pageMean >= 118
+      && output.sheetValidation.darkFraction <= 0.42
+      && grid.questionCoverage >= 0.58
+      && grid.boxCoverage >= 0.34
+      && grid.averageScore >= 0.075;
   }
 
   function grade(sourceCanvas, answerKeyText, scoreRuleText, options = {}) {
@@ -459,7 +569,7 @@
 
     if (!bestOutput) {
       const detail = bestRejected ? `（${bestRejected.output.sheetValidation.summary}）` : "";
-      throw new Error(`未检测到完整选择题答题框，请把选择题区域完整放进取景框${detail}`);
+      throw new Error(`未检测到完整选择题外框，请把选择题区域四个角完整放进取景框${detail}`);
     }
     bestOutput.processedCandidates = processedCandidates;
     return bestOutput;
@@ -1123,7 +1233,7 @@
     return output;
   }
 
-  function evaluateSheet(gray, output) {
+  function evaluateSheet(gray, output, options = {}) {
     const content = { x1: px(40), y1: px(35), x2: gray.width - px(41), y2: gray.height - px(36) };
     const pageMean = gray.mean(content);
     const veryDarkFraction = gray.fractionBelow(content, 70);
@@ -1160,6 +1270,14 @@
       && grid.averageScore >= 0.07
       && (moderateGrid || framedWeakGrid)
       && (frame.count >= 2 || frame.score >= 0.50 || grid.questionCoverage >= 0.58);
+    const cornerAccept = options.cornerMode
+      && output.recognizedCount >= CORNER_MIN_RECOGNIZED
+      && pageMean >= 118
+      && veryDarkFraction <= 0.24
+      && darkFraction <= 0.42
+      && grid.questionCoverage >= 0.58
+      && grid.boxCoverage >= 0.34
+      && grid.averageScore >= 0.075;
 
     const score = clamp((pageMean - 120) / 80, 0, 1.4)
       + clamp((0.42 - darkFraction) * 3.0, -1.0, 1.2)
@@ -1171,8 +1289,8 @@
 
     const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，框 ${(grid.boxCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
     return {
-      valid: problems.length === 0 || lowConfidenceAccept,
-      lowConfidence: problems.length > 0 && lowConfidenceAccept,
+      valid: problems.length === 0 || lowConfidenceAccept || cornerAccept,
+      lowConfidence: problems.length > 0 && (lowConfidenceAccept || cornerAccept),
       problems,
       score,
       pageMean,
@@ -1580,7 +1698,25 @@
     context.lineWidth = 2;
     context.strokeStyle = isBusy ? "rgba(19, 138, 82, 0.95)" : "rgba(255,255,255,0.84)";
     context.strokeRect(x, y, width, height);
+    const corner = Math.min(44, width * 0.14, height * 0.14);
+    context.lineWidth = 4;
+    context.strokeStyle = isBusy ? "rgba(19, 138, 82, 0.98)" : "rgba(37, 99, 235, 0.95)";
+    context.beginPath();
+    context.moveTo(x, y + corner);
+    context.lineTo(x, y);
+    context.lineTo(x + corner, y);
+    context.moveTo(x + width - corner, y);
+    context.lineTo(x + width, y);
+    context.lineTo(x + width, y + corner);
+    context.moveTo(x + width, y + height - corner);
+    context.lineTo(x + width, y + height);
+    context.lineTo(x + width - corner, y + height);
+    context.moveTo(x + corner, y + height);
+    context.lineTo(x, y + height);
+    context.lineTo(x, y + height - corner);
+    context.stroke();
     context.strokeStyle = "rgba(255,255,255,0.32)";
+    context.lineWidth = 2;
     context.beginPath();
     context.moveTo(x + width / 2, y);
     context.lineTo(x + width / 2, y + height);
