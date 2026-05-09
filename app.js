@@ -25,6 +25,9 @@
   const PRESET_ANSWER_KEY = "CBAACCCAACCCBBCBBBAAADBCABCBDDADCADBECADCDABBCDAADBDACB";
   const PRESET_SCORE_RULES = "1-20:1.5 21-40:2.5 41-55:1";
   const COMPLETE_SCAN_MIN_RECOGNIZED = 46;
+  const MIN_GRID_QUESTION_COVERAGE = 0.62;
+  const MIN_GRID_BOX_COVERAGE = 0.36;
+  const MIN_GRID_AVERAGE_SCORE = 0.08;
 
   const BLOCKS = [
     { startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 },
@@ -316,8 +319,10 @@
     let bestRejected = null;
     for (const scored of shortlist) {
       const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues);
-      output.sheetValidation = evaluateSheet(scored.gray, output);
-      const quality = output.sheetValidation.score * 800.0
+        output.sheetValidation = evaluateSheet(scored.gray, output);
+      const quality = output.sheetValidation.score * 1400.0
+        + output.sheetValidation.grid.questionCoverage * 1600.0
+        + output.sheetValidation.grid.boxCoverage * 700.0
         + output.recognizedCount * 100.0
         + output.layoutConfidence * 20.0
         + scored.quickQuality * 0.05;
@@ -564,6 +569,7 @@
           confidence,
           bestCenterX: centers[best][0],
           bestCenterY: centers[best][1],
+          choiceCenters: centers,
           scores
         });
 
@@ -595,6 +601,7 @@
     const veryDarkFraction = gray.fractionBelow(content, 70);
     const darkFraction = gray.fractionBelow(content, 110);
     const frame = estimateFrame(gray);
+    const grid = estimateOptionGrid(gray, output);
     const averageConfidence = output.questions.reduce((sum, question) => sum + Math.max(0, question.confidence), 0) / QUESTION_COUNT;
     const recognizedRatio = output.recognizedCount / QUESTION_COUNT;
 
@@ -611,14 +618,19 @@
     if (frame.count < 2 && frame.score < 0.55) {
       problems.push("没有检测到完整答题卡边框");
     }
+    if (grid.questionCoverage < MIN_GRID_QUESTION_COVERAGE || grid.boxCoverage < MIN_GRID_BOX_COVERAGE || grid.averageScore < MIN_GRID_AVERAGE_SCORE) {
+      problems.push("选择框网格没有对齐");
+    }
 
     const score = clamp((pageMean - 120) / 80, 0, 1.4)
       + clamp((0.42 - darkFraction) * 3.0, -1.0, 1.2)
       + frame.score
+      + grid.questionCoverage * 1.8
+      + grid.boxCoverage
       + recognizedRatio
       + clamp(averageConfidence * 2.0, 0, 1.2);
 
-    const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，识别 ${output.recognizedCount}/55`;
+    const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
     return {
       valid: problems.length === 0,
       problems,
@@ -627,9 +639,68 @@
       veryDarkFraction,
       darkFraction,
       frame,
+      grid,
       averageConfidence,
       summary
     };
+  }
+
+  function estimateOptionGrid(gray, output) {
+    let totalBoxes = 0;
+    let strongBoxes = 0;
+    let scoreSum = 0;
+    let coveredQuestions = 0;
+    let strongQuestionCount = 0;
+
+    for (const question of output.questions) {
+      const centers = question.choiceCenters || [];
+      let questionStrong = 0;
+      let questionSum = 0;
+      for (const center of centers) {
+        const score = optionBoxStructureScore(gray, center[0], center[1]);
+        totalBoxes += 1;
+        scoreSum += score;
+        questionSum += score;
+        if (score >= 0.13) {
+          strongBoxes += 1;
+          questionStrong += 1;
+        }
+      }
+      if (questionStrong >= Math.min(2, centers.length)) {
+        coveredQuestions += 1;
+      }
+      if (centers.length && questionSum / centers.length >= 0.16) {
+        strongQuestionCount += 1;
+      }
+    }
+
+    return {
+      boxCoverage: totalBoxes ? strongBoxes / totalBoxes : 0,
+      questionCoverage: output.questions.length ? coveredQuestions / output.questions.length : 0,
+      strongQuestionCoverage: output.questions.length ? strongQuestionCount / output.questions.length : 0,
+      averageScore: totalBoxes ? scoreSum / totalBoxes : 0,
+      totalBoxes,
+      strongBoxes,
+      coveredQuestions
+    };
+  }
+
+  function optionBoxStructureScore(gray, cx, cy) {
+    const outer = rectI(cx, cy, 28, 18, gray.width, gray.height);
+    if (rectArea(outer) <= 0) {
+      return 0;
+    }
+    const local = gray.mean(outer);
+    const threshold = clamp(local - 30, 70, 150);
+    const top = gray.fractionBelow(rectI(cx, cy - 10, 18, 1, gray.width, gray.height), threshold);
+    const bottom = gray.fractionBelow(rectI(cx, cy + 10, 18, 1, gray.width, gray.height), threshold);
+    const left = gray.fractionBelow(rectI(cx - 18, cy, 1, 10, gray.width, gray.height), threshold);
+    const right = gray.fractionBelow(rectI(cx + 18, cy, 1, 10, gray.width, gray.height), threshold);
+    const horizontalPair = Math.min(top, bottom);
+    const verticalPair = Math.min(left, right);
+    const edgeAverage = (top + bottom + left + right) / 4;
+    const pairScore = (horizontalPair + verticalPair) / 2;
+    return 0.62 * pairScore + 0.38 * edgeAverage;
   }
 
   function estimateFrame(gray) {
