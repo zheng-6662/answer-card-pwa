@@ -29,6 +29,9 @@
   const MIN_GRID_BOX_COVERAGE = 0.36;
   const MIN_GRID_AVERAGE_SCORE = 0.08;
   const CHOICE_REGION_PRIORITY = 900;
+  const PAPER_LAYOUT_PRIORITY = 650;
+  const VIEWFINDER_MARGIN_MIN = 18;
+  const VIEWFINDER_MARGIN_RATIO = 0.07;
 
   const BLOCKS = [
     { startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 },
@@ -159,7 +162,7 @@
       state.scanning = true;
       hideSuccessPanel();
       el.cameraEmpty.classList.add("hidden");
-      setStatus("扫描中：把答题卡完整放进画面，停稳后会自动刷新。");
+      setStatus("扫描中：把选择题区域放进取景框，程序会先自动截取再识别。");
       drawCameraFrame();
       scheduleScan(250);
     } catch (error) {
@@ -210,9 +213,49 @@
   function captureVideoCanvas() {
     const width = el.video.videoWidth || 1280;
     const height = el.video.videoHeight || 720;
-    const canvas = makeCanvas(width, height);
-    canvas.getContext("2d", { willReadFrequently: true }).drawImage(el.video, 0, 0, width, height);
+    const sourceRect = visibleVideoSourceRect(width, height);
+    const frameRect = innerViewfinderSourceRect(sourceRect);
+    const canvas = makeCanvas(frameRect.width, frameRect.height);
+    canvas.getContext("2d", { willReadFrequently: true }).drawImage(
+      el.video,
+      frameRect.x,
+      frameRect.y,
+      frameRect.width,
+      frameRect.height,
+      0,
+      0,
+      frameRect.width,
+      frameRect.height
+    );
     return canvas;
+  }
+
+  function visibleVideoSourceRect(videoWidth, videoHeight) {
+    const stageRect = el.cameraStage ? el.cameraStage.getBoundingClientRect() : null;
+    const stageWidth = stageRect && stageRect.width > 0 ? stageRect.width : videoWidth;
+    const stageHeight = stageRect && stageRect.height > 0 ? stageRect.height : videoHeight;
+    const scale = Math.max(stageWidth / videoWidth, stageHeight / videoHeight);
+    const visibleWidth = Math.min(videoWidth, stageWidth / scale);
+    const visibleHeight = Math.min(videoHeight, stageHeight / scale);
+    return {
+      x: Math.max(0, (videoWidth - visibleWidth) / 2),
+      y: Math.max(0, (videoHeight - visibleHeight) / 2),
+      width: visibleWidth,
+      height: visibleHeight,
+      stageWidth,
+      stageHeight
+    };
+  }
+
+  function innerViewfinderSourceRect(sourceRect) {
+    const marginCss = Math.max(VIEWFINDER_MARGIN_MIN, sourceRect.stageWidth * VIEWFINDER_MARGIN_RATIO);
+    const insetX = sourceRect.width * clamp(marginCss / sourceRect.stageWidth, 0, 0.22);
+    const insetY = sourceRect.height * clamp(marginCss / sourceRect.stageHeight, 0, 0.22);
+    const x = sourceRect.x + insetX;
+    const y = sourceRect.y + insetY;
+    const width = Math.max(1, sourceRect.width - insetX * 2);
+    const height = Math.max(1, sourceRect.height - insetY * 2);
+    return { x, y, width, height };
   }
 
   async function handleFile(event) {
@@ -237,7 +280,7 @@
     }
     state.processing = true;
     drawCameraFrame(true);
-    setStatus(`正在识别${sourceName}...`);
+    setStatus(`正在识别${sourceName}：先截取取景框和选择题区域...`);
     await nextFrame();
 
     const startedAt = performance.now();
@@ -253,11 +296,21 @@
       completeScan(output);
     } catch (error) {
       const message = cleanMessage(error);
-      setStatus(message.includes("完整答题卡") ? message : `识别失败：${message}`, message.includes("完整答题卡") ? "warn" : "bad");
+      clearCurrentOutput();
+      setStatus(message.includes("完整选择题") ? message : `识别失败：${message}`, message.includes("完整选择题") ? "warn" : "bad");
     } finally {
       state.processing = false;
       drawCameraFrame(false);
     }
+  }
+
+  function clearCurrentOutput() {
+    state.lastOutput = null;
+    hideSuccessPanel();
+    updateMetrics(null);
+    renderQuestions([]);
+    drawEmptyResult();
+    el.saveResultButton.disabled = true;
   }
 
   function completeScan(output) {
@@ -338,7 +391,7 @@
     let bestRejected = null;
     for (const scored of shortlist) {
       const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues);
-        output.sheetValidation = evaluateSheet(scored.gray, output);
+      output.sheetValidation = evaluateSheet(scored.gray, output);
       const quality = output.sheetValidation.score * 1400.0
         + output.sheetValidation.grid.questionCoverage * 1600.0
         + output.sheetValidation.grid.boxCoverage * 700.0
@@ -359,7 +412,7 @@
 
     if (!bestOutput) {
       const detail = bestRejected ? `（${bestRejected.output.sheetValidation.summary}）` : "";
-      throw new Error(`未检测到完整答题卡，请把整张答题卡放进画面${detail}`);
+      throw new Error(`未检测到完整选择题答题框，请把选择题区域完整放进取景框${detail}`);
     }
     return bestOutput;
   }
@@ -441,6 +494,8 @@
         );
       }
 
+      addPaperLayoutCandidates(rotated, degrees, candidates);
+
       if (choiceOnlyPass) {
         continue;
       }
@@ -458,6 +513,54 @@
       addAspectCandidates(rotated, degrees, candidates);
     }
     return candidates;
+  }
+
+  function addPaperLayoutCandidates(canvas, degrees, candidates) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const aspect = width / height;
+
+    if (aspect < 1.05) {
+      const specs = [
+        { x: 0.030, y: 0.145, w: 0.940, h: 0.360, weight: 1.00 },
+        { x: 0.025, y: 0.155, w: 0.950, h: 0.335, weight: 0.98 },
+        { x: 0.035, y: 0.170, w: 0.930, h: 0.340, weight: 0.96 },
+        { x: 0.030, y: 0.125, w: 0.940, h: 0.390, weight: 0.92 },
+        { x: 0.045, y: 0.160, w: 0.910, h: 0.355, weight: 0.88 },
+        { x: 0.020, y: 0.110, w: 0.960, h: 0.420, weight: 0.82 }
+      ];
+      for (const spec of specs) {
+        addRelativeCropCandidate(canvas, degrees, candidates, spec, "paper-portrait");
+      }
+      return;
+    }
+
+    if (aspect >= 1.05 && aspect < 1.78) {
+      const specs = [
+        { x: 0.030, y: 0.190, w: 0.940, h: 0.455, weight: 0.78 },
+        { x: 0.040, y: 0.220, w: 0.920, h: 0.430, weight: 0.72 }
+      ];
+      for (const spec of specs) {
+        addRelativeCropCandidate(canvas, degrees, candidates, spec, "paper-landscape");
+      }
+    }
+  }
+
+  function addRelativeCropCandidate(canvas, degrees, candidates, spec, label) {
+    const x = Math.round(canvas.width * spec.x);
+    const y = Math.round(canvas.height * spec.y);
+    const width = Math.round(canvas.width * spec.w);
+    const height = Math.round(canvas.height * spec.h);
+    if (width < 160 || height < 90) {
+      return;
+    }
+    const crop = cropCanvas(canvas, x, y, width, height);
+    addCanonicalCandidate(
+      crop,
+      `rot=${degrees} ${label}=${x},${y} ${width}x${height}`,
+      candidates,
+      PAPER_LAYOUT_PRIORITY + Math.round((spec.weight || 0) * 90)
+    );
   }
 
   function preferredRotations(canvas) {
@@ -863,13 +966,14 @@
     if (output.recognizedCount < COMPLETE_SCAN_MIN_RECOGNIZED) {
       problems.push(`识别题数不足 ${output.recognizedCount}/55`);
     }
-    if (pageMean < 138) {
+    if (pageMean < 125) {
       problems.push("画面整体过暗");
     }
     if (veryDarkFraction > 0.24 || darkFraction > 0.42) {
       problems.push("画面里非答题卡区域过多");
     }
-    if (frame.count < 2 && frame.score < 0.55) {
+    const gridCanStandInForFrame = grid.questionCoverage >= 0.74 && grid.boxCoverage >= 0.50 && grid.averageScore >= 0.11;
+    if (frame.count < 2 && frame.score < 0.55 && !gridCanStandInForFrame) {
       problems.push("没有检测到完整答题卡边框");
     }
     if (grid.questionCoverage < MIN_GRID_QUESTION_COVERAGE || grid.boxCoverage < MIN_GRID_BOX_COVERAGE || grid.averageScore < MIN_GRID_AVERAGE_SCORE) {
@@ -884,7 +988,7 @@
       + recognizedRatio
       + clamp(averageConfidence * 2.0, 0, 1.2);
 
-    const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
+    const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，框 ${(grid.boxCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
     return {
       valid: problems.length === 0,
       problems,
@@ -1289,7 +1393,7 @@
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, rect.width, rect.height);
 
-    const margin = Math.max(18, rect.width * 0.07);
+    const margin = Math.max(VIEWFINDER_MARGIN_MIN, rect.width * VIEWFINDER_MARGIN_RATIO);
     const x = margin;
     const y = margin;
     const width = rect.width - margin * 2;
