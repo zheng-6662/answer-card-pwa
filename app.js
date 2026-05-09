@@ -42,6 +42,7 @@
   const CAMERA_FRAME_MAX_DIMENSION = 1400;
   const CORNER_INPUT_MAX_DIMENSION = 1600;
   const CORNER_MIN_RECOGNIZED = 54;
+  const FORCE_CAMERA_FILE = new URLSearchParams(window.location.search).has("cameraFile");
 
   const BLOCKS = [
     scaleBlock({ startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 }),
@@ -186,7 +187,7 @@
       state.scanning = true;
       hideSuccessPanel();
       el.cameraEmpty.classList.add("hidden");
-      setStatus("扫描中：把选择题外框四个角都放进取景框，程序会先找外框截取再识别。");
+      setStatus("扫描中：把选择题外框四个角放进画面，白框只是对准提示，程序会用完整相机画面识别。");
       drawCameraFrame();
       scheduleScan(250);
     } catch (error) {
@@ -238,7 +239,7 @@
     const width = el.video.videoWidth || 1280;
     const height = el.video.videoHeight || 720;
     const sourceRect = visibleVideoSourceRect(width, height);
-    const frameRect = innerViewfinderSourceRect(sourceRect);
+    const frameRect = sourceRect;
     const frameScale = Math.min(1, CAMERA_FRAME_MAX_DIMENSION / Math.max(frameRect.width, frameRect.height));
     const outputWidth = Math.max(1, Math.round(frameRect.width * frameScale));
     const outputHeight = Math.max(1, Math.round(frameRect.height * frameScale));
@@ -312,7 +313,7 @@
 
     const startedAt = performance.now();
     try {
-      const output = sourceName === "相机"
+      const output = sourceName === "相机" || FORCE_CAMERA_FILE
         ? gradeCameraFrame(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES)
         : grade(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES);
       state.lastOutput = output;
@@ -438,21 +439,21 @@
     for (const degrees of preferredRotations(fitted)) {
       const rotated = rotateCanvas(fitted, degrees);
       const candidates = [];
-      const regions = findChoiceRegionCrops(rotated).slice(0, 4);
+      addPaperLayoutCandidates(rotated, degrees, candidates);
+      const regions = findChoiceRegionCrops(rotated).slice(0, 2);
       for (const region of regions) {
         addCanonicalCandidate(
           region.canvas,
           `rot=${degrees} frame-corners=${region.x},${region.y} ${region.width}x${region.height}`,
           candidates,
-          1300 + Math.round(region.score * 160)
+          760 + Math.round(region.score * 120)
         );
       }
-      addPaperLayoutCandidates(rotated, degrees, candidates);
 
       const ordered = candidates
         .slice()
-        .sort((a, b) => (b.priority || 0) - (a.priority || 0))
-        .slice(0, 5);
+        .sort((a, b) => fastCameraCropPriority(b) - fastCameraCropPriority(a))
+        .slice(0, 4);
       for (const candidate of ordered) {
         const fastScored = scoreCandidate(candidate, { fastAlignment: true });
         const fastOutput = gradeCanonical(fastScored.candidate, fastScored.gray, fastScored.global, answerKey, pointValues, { fastAlignment: true });
@@ -505,12 +506,36 @@
       return false;
     }
     const grid = output.sheetValidation.grid;
-    return output.recognizedCount >= 52
+    const normalNearHit = output.recognizedCount >= 52
       && output.sheetValidation.pageMean >= 118
       && output.sheetValidation.darkFraction <= 0.42
       && grid.questionCoverage >= 0.62
       && grid.boxCoverage >= 0.48
       && grid.averageScore >= 0.09;
+    const lowInkNearHit = output.recognizedCount >= 50
+      && output.sheetValidation.pageMean >= 165
+      && output.sheetValidation.darkFraction <= 0.08
+      && grid.boxCoverage >= 0.18
+      && grid.averageScore >= 0.055;
+    return normalNearHit || lowInkNearHit;
+  }
+
+  function fastCameraCropPriority(candidate) {
+    const note = candidate.note || "";
+    let score = candidate.priority || 0;
+    if (note.includes("paper-landscape")) {
+      score += 1000;
+    } else if (note.includes("paper-portrait")) {
+      score += 900;
+    } else if (note.includes("frame-corners")) {
+      score += 700;
+    }
+    if (note.includes("rot=0")) {
+      score += 80;
+    } else if (note.includes("rot=180")) {
+      score -= 120;
+    }
+    return score;
   }
 
   function isCornerFrameResult(output) {
@@ -518,12 +543,27 @@
       return false;
     }
     const grid = output.sheetValidation.grid;
-    return output.recognizedCount >= CORNER_MIN_RECOGNIZED
+    const normalResult = output.recognizedCount >= CORNER_MIN_RECOGNIZED
       && output.sheetValidation.pageMean >= 118
       && output.sheetValidation.darkFraction <= 0.42
       && grid.questionCoverage >= 0.58
       && grid.boxCoverage >= 0.34
       && grid.averageScore >= 0.075;
+    const lowInkResult = output.recognizedCount >= CORNER_MIN_RECOGNIZED
+      && output.sheetValidation.pageMean >= 165
+      && output.sheetValidation.veryDarkFraction <= 0.10
+      && output.sheetValidation.darkFraction <= 0.08
+      && grid.questionCoverage >= 0.32
+      && grid.boxCoverage >= 0.30
+      && grid.averageScore >= 0.08;
+    const distantLowInkResult = output.recognizedCount >= 55
+      && output.sheetValidation.pageMean >= 165
+      && output.sheetValidation.veryDarkFraction <= 0.10
+      && output.sheetValidation.darkFraction <= 0.08
+      && grid.questionCoverage >= 0.18
+      && grid.boxCoverage >= 0.18
+      && grid.averageScore >= 0.055;
+    return normalResult || lowInkResult || distantLowInkResult;
   }
 
   function grade(sourceCanvas, answerKeyText, scoreRuleText, options = {}) {
@@ -818,6 +858,9 @@
 
     if (aspect >= 1.05 && aspect < 1.78) {
       const specs = [
+        { x: 0.045, y: 0.215, w: 0.900, h: 0.520, weight: 1.08 },
+        { x: 0.055, y: 0.235, w: 0.890, h: 0.500, weight: 1.05 },
+        { x: 0.075, y: 0.260, w: 0.870, h: 0.485, weight: 1.02 },
         { x: 0.030, y: 0.190, w: 0.940, h: 0.455, weight: 0.78 },
         { x: 0.040, y: 0.220, w: 0.920, h: 0.430, weight: 0.72 }
       ];
@@ -1178,8 +1221,8 @@
         const scores = [];
         const centers = [];
         for (let choice = 0; choice < block.choiceCount; choice += 1) {
-          const cx = Math.round(block.x0 + alignment.offsetX + block.dx * choice);
-          const cy = Math.round(block.y0 + alignment.offsetY + block.dy * row);
+          const cx = Math.round(block.x0 + alignment.offsetX + block.dx * choice * (alignment.scaleX || 1));
+          const cy = Math.round(block.y0 + alignment.offsetY + block.dy * row * (alignment.scaleY || 1));
           centers.push([cx, cy]);
           scores.push(fillScore(gray, cx, cy));
         }
@@ -1278,6 +1321,20 @@
       && grid.questionCoverage >= 0.58
       && grid.boxCoverage >= 0.34
       && grid.averageScore >= 0.075;
+    const lowInkAccept = output.recognizedCount >= CORNER_MIN_RECOGNIZED
+      && pageMean >= 165
+      && veryDarkFraction <= 0.10
+      && darkFraction <= 0.08
+      && grid.questionCoverage >= 0.32
+      && grid.boxCoverage >= 0.30
+      && grid.averageScore >= 0.08;
+    const distantLowInkAccept = output.recognizedCount >= 55
+      && pageMean >= 165
+      && veryDarkFraction <= 0.10
+      && darkFraction <= 0.08
+      && grid.questionCoverage >= 0.18
+      && grid.boxCoverage >= 0.18
+      && grid.averageScore >= 0.055;
 
     const score = clamp((pageMean - 120) / 80, 0, 1.4)
       + clamp((0.42 - darkFraction) * 3.0, -1.0, 1.2)
@@ -1289,8 +1346,8 @@
 
     const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，框 ${(grid.boxCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
     return {
-      valid: problems.length === 0 || lowConfidenceAccept || cornerAccept,
-      lowConfidence: problems.length > 0 && (lowConfidenceAccept || cornerAccept),
+      valid: problems.length === 0 || lowConfidenceAccept || cornerAccept || lowInkAccept || distantLowInkAccept,
+      lowConfidence: problems.length > 0 && (lowConfidenceAccept || cornerAccept || lowInkAccept || distantLowInkAccept),
       problems,
       score,
       pageMean,
@@ -1344,16 +1401,26 @@
   }
 
   function optionBoxStructureScore(gray, cx, cy) {
-    const outer = rectI(cx, cy, px(28), px(18), gray.width, gray.height);
+    return Math.max(
+      optionBoxStructureScoreAt(gray, cx, cy, 0.68),
+      optionBoxStructureScoreAt(gray, cx, cy, 0.82),
+      optionBoxStructureScoreAt(gray, cx, cy, 1.0)
+    );
+  }
+
+  function optionBoxStructureScoreAt(gray, cx, cy, scale) {
+    const outer = rectI(cx, cy, px(28 * scale), px(18 * scale), gray.width, gray.height);
     if (rectArea(outer) <= 0) {
       return 0;
     }
     const local = gray.mean(outer);
     const threshold = clamp(local - 30, 70, 150);
-    const top = gray.fractionBelow(rectI(cx, cy - px(10), px(18), 1, gray.width, gray.height), threshold);
-    const bottom = gray.fractionBelow(rectI(cx, cy + px(10), px(18), 1, gray.width, gray.height), threshold);
-    const left = gray.fractionBelow(rectI(cx - px(18), cy, 1, px(10), gray.width, gray.height), threshold);
-    const right = gray.fractionBelow(rectI(cx + px(18), cy, 1, px(10), gray.width, gray.height), threshold);
+    const edgeX = px(18 * scale);
+    const edgeY = px(10 * scale);
+    const top = gray.fractionBelow(rectI(cx, cy - edgeY, edgeX, 1, gray.width, gray.height), threshold);
+    const bottom = gray.fractionBelow(rectI(cx, cy + edgeY, edgeX, 1, gray.width, gray.height), threshold);
+    const left = gray.fractionBelow(rectI(cx - edgeX, cy, 1, edgeY, gray.width, gray.height), threshold);
+    const right = gray.fractionBelow(rectI(cx + edgeX, cy, 1, edgeY, gray.width, gray.height), threshold);
     const horizontalPair = Math.min(top, bottom);
     const verticalPair = Math.min(left, right);
     const edgeAverage = (top + bottom + left + right) / 4;
@@ -1435,48 +1502,94 @@
     const step = px(options.fastAlignment ? 10 : 7);
     for (let ox = global.offsetX - range; ox <= global.offsetX + range; ox += step) {
       for (let oy = global.offsetY - range; oy <= global.offsetY + range; oy += step) {
-        let recognized = 0;
-        let boxSum = 0;
-        let confidenceSum = 0;
-        for (let row = 0; row < block.questionCount; row += 1) {
-          const scores = [];
-          for (let choice = 0; choice < block.choiceCount; choice += 1) {
-            const cx = Math.round(block.x0 + ox + block.dx * choice);
-            const cy = Math.round(block.y0 + oy + block.dy * row);
-            scores.push(fillScore(gray, cx, cy));
-            boxSum += boxScore(gray, cx, cy);
-          }
-          const bestChoice = bestIndex(scores);
-          const bestScore = scores[bestChoice];
-          const confidence = bestScore - secondBest(scores, bestChoice);
-          confidenceSum += Math.max(0, confidence);
-          if (bestScore >= MIN_MARK_SCORE && confidence >= MIN_CONFIDENCE) {
-            recognized += 1;
-          }
-        }
-        const quality = boxSum
-          + confidenceSum * 1.5
-          + recognized * 0.4
+        const candidate = scoreBlockAlignment(gray, block, ox, oy, 1, 1);
+        const quality = candidate.boxSum
+          + candidate.confidenceSum * 1.5
+          + candidate.recognized * 0.4
           - 0.04 * (Math.abs(ox - global.offsetX) + Math.abs(oy - global.offsetY));
         if (!best || quality > best.quality) {
-          best = { offsetX: ox, offsetY: oy, recognizedCount: recognized, confidenceSum, quality };
+          best = { offsetX: ox, offsetY: oy, scaleX: 1, scaleY: 1, recognizedCount: candidate.recognized, confidenceSum: candidate.confidenceSum, quality };
         }
       }
     }
-    return best || global;
+    if (best && options.flexBlockScale) {
+      best = refineBlockScale(gray, block, global, best, options);
+    }
+    return best || { ...global, scaleX: 1, scaleY: 1 };
+  }
+
+  function refineBlockScale(gray, block, global, base, options = {}) {
+    let best = base;
+    const offsetRange = px(options.fastAlignment ? 12 : 16);
+    const offsetStep = px(options.fastAlignment ? 8 : 8);
+    const scales = [0.86, 0.94, 1.0, 1.08, 1.16];
+    for (const scaleX of scales) {
+      for (const scaleY of scales) {
+        for (let ox = base.offsetX - offsetRange; ox <= base.offsetX + offsetRange; ox += offsetStep) {
+          for (let oy = base.offsetY - offsetRange; oy <= base.offsetY + offsetRange; oy += offsetStep) {
+            const candidate = scoreBlockAlignment(gray, block, ox, oy, scaleX, scaleY);
+            const quality = candidate.boxSum
+              + candidate.confidenceSum * 1.5
+              + candidate.recognized * 0.5
+              - 0.035 * (Math.abs(ox - global.offsetX) + Math.abs(oy - global.offsetY))
+              - 0.18 * (Math.abs(scaleX - 1) + Math.abs(scaleY - 1));
+            if (!best || quality > best.quality) {
+              best = { offsetX: ox, offsetY: oy, scaleX, scaleY, recognizedCount: candidate.recognized, confidenceSum: candidate.confidenceSum, quality };
+            }
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  function scoreBlockAlignment(gray, block, ox, oy, scaleX = 1, scaleY = 1) {
+    let recognized = 0;
+    let boxSum = 0;
+    let confidenceSum = 0;
+    for (let row = 0; row < block.questionCount; row += 1) {
+      const scores = [];
+      for (let choice = 0; choice < block.choiceCount; choice += 1) {
+        const cx = Math.round(block.x0 + ox + block.dx * choice * scaleX);
+        const cy = Math.round(block.y0 + oy + block.dy * row * scaleY);
+        scores.push(fillScore(gray, cx, cy));
+        boxSum += boxScore(gray, cx, cy);
+      }
+      const bestChoice = bestIndex(scores);
+      const bestScore = scores[bestChoice];
+      const confidence = bestScore - secondBest(scores, bestChoice);
+      confidenceSum += Math.max(0, confidence);
+      if (bestScore >= MIN_MARK_SCORE && confidence >= MIN_CONFIDENCE) {
+        recognized += 1;
+      }
+    }
+    return { recognized, boxSum, confidenceSum };
   }
 
   function fillScore(gray, cx, cy) {
     const outer = rectI(cx, cy, px(30), px(20), gray.width, gray.height);
-    const inner = rectI(cx, cy, px(11), px(6), gray.width, gray.height);
-    if (rectArea(inner) <= 0 || rectArea(outer) <= 0) {
+    if (rectArea(outer) <= 0) {
       return 0;
     }
     const local = gray.mean(outer) + 25;
-    const mean = gray.mean(inner);
-    const fraction = gray.fractionBelow(inner, local - 40);
-    const contrast = clamp((local - mean) / 85, 0, 1);
-    return 0.65 * fraction + 0.35 * contrast;
+    const scoreRect = (rect) => {
+      if (rectArea(rect) <= 0) {
+        return 0;
+      }
+      const mean = gray.mean(rect);
+      const fraction = gray.fractionBelow(rect, local - 40);
+      const contrast = clamp((local - mean) / 85, 0, 1);
+      return 0.65 * fraction + 0.35 * contrast;
+    };
+    const small = scoreRect(rectI(cx, cy, px(11), px(6), gray.width, gray.height));
+    const medium = scoreRect(rectI(cx, cy, px(15), px(8), gray.width, gray.height));
+    const shifted = Math.max(
+      scoreRect(rectI(cx - px(5), cy, px(11), px(6), gray.width, gray.height)),
+      scoreRect(rectI(cx + px(5), cy, px(11), px(6), gray.width, gray.height)),
+      scoreRect(rectI(cx, cy - px(4), px(11), px(6), gray.width, gray.height)),
+      scoreRect(rectI(cx, cy + px(4), px(11), px(6), gray.width, gray.height))
+    );
+    return Math.max(small, medium * 0.96, shifted * 0.94);
   }
 
   function boxScore(gray, cx, cy) {
