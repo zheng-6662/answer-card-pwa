@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f8fb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="答题卡改卷">
+  <title>答题卡改卷</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./assets/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">本机识别</p>
+        <h1>答题卡改卷</h1>
+      </div>
+      <button id="installButton" class="ghost-button" type="button" hidden>安装</button>
+    </header>
+
+    <section class="scanner-panel" aria-label="连续扫描">
+      <div class="camera-stage" id="cameraStage">
+        <video id="video" playsinline muted></video>
+        <canvas id="cameraOverlay" aria-hidden="true"></canvas>
+        <div id="cameraEmpty" class="camera-empty">等待开始</div>
+      </div>
+
+      <div class="action-row">
+        <button id="startButton" class="primary-button" type="button">开始扫描</button>
+        <button id="stopButton" class="secondary-button" type="button">停止</button>
+        <label class="secondary-button file-button">
+          选照片
+          <input id="fileInput" type="file" accept="image/*" capture="environment">
+        </label>
+      </div>
+
+      <p id="statusText" class="status-text">请先填写标答和分值，或直接扫描只识别选项。</p>
+    </section>
+
+    <section class="summary-grid" aria-label="当前结果">
+      <div>
+        <span class="metric-label">得分</span>
+        <strong id="scoreMetric">--</strong>
+      </div>
+      <div>
+        <span class="metric-label">识别</span>
+        <strong id="recognizedMetric">0/55</strong>
+      </div>
+      <div>
+        <span class="metric-label">正确</span>
+        <strong id="correctMetric">--</strong>
+      </div>
+    </section>
+
+    <section class="settings-panel" aria-label="设置">
+      <label class="field-block">
+        <span>正确答案</span>
+        <textarea id="answerKeyInput" rows="3" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="1:A 2:B 3:C，或 ABCDBAC..."></textarea>
+      </label>
+      <label class="field-block">
+        <span>每题分值</span>
+        <textarea id="scoreRuleInput" rows="2" autocomplete="off" spellcheck="false">1-20:1.5 21-40:2.5 41-55:1</textarea>
+      </label>
+    </section>
+
+    <section class="preview-panel" aria-label="识别预览">
+      <div class="section-title-row">
+        <h2>识别预览</h2>
+        <button id="saveResultButton" class="ghost-button" type="button" disabled>保存当前</button>
+      </div>
+      <canvas id="resultCanvas"></canvas>
+    </section>
+
+    <section class="results-panel" aria-label="题目明细">
+      <div class="section-title-row">
+        <h2>题目明细</h2>
+        <button id="clearHistoryButton" class="ghost-button" type="button">清空记录</button>
+      </div>
+      <div id="questionRows" class="question-rows"></div>
+    </section>
+
+    <section class="history-panel" aria-label="最近记录">
+      <h2>最近记录</h2>
+      <div id="historyRows" class="history-rows"></div>
+    </section>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
