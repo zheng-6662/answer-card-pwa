@@ -1,4 +1,4 @@
-const CACHE_NAME = "answer-card-pwa-v6";
+const CACHE_NAME = "answer-card-pwa-v8";
 const ASSETS = [
   "./",
   "./index.html",

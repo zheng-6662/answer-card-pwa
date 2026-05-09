@@ -1,14 +1,17 @@
 (() => {
   "use strict";
 
-  const CANONICAL_WIDTH = 1600;
-  const CANONICAL_HEIGHT = 760;
+  const TEMPLATE_WIDTH = 1600;
+  const TEMPLATE_HEIGHT = 760;
+  const RECOGNITION_SCALE = 0.9;
+  const CANONICAL_WIDTH = Math.round(TEMPLATE_WIDTH * RECOGNITION_SCALE);
+  const CANONICAL_HEIGHT = Math.round(TEMPLATE_HEIGHT * RECOGNITION_SCALE);
   const QUESTION_COUNT = 55;
   const LETTERS = Array.from("ABCDEFG");
   const MIN_MARK_SCORE = 0.22;
   const MIN_CONFIDENCE = 0.06;
   const TARGET_ASPECT = CANONICAL_WIDTH / CANONICAL_HEIGHT;
-  const SCAN_INTERVAL_MS = 1800;
+  const SCAN_INTERVAL_MS = 900;
   const PRESET_ANSWER_GROUPS = [
     "1-5 CBAAC",
     "6-10 CCAAC",
@@ -24,7 +27,7 @@
   ];
   const PRESET_ANSWER_KEY = "CBAACCCAACCCBBCBBBAAADBCABCBDDADCADBECADCDABBCDAADBDACB";
   const PRESET_SCORE_RULES = "1-20:1.5 21-40:2.5 41-55:1";
-  const COMPLETE_SCAN_MIN_RECOGNIZED = 46;
+  const COMPLETE_SCAN_MIN_RECOGNIZED = 54;
   const MIN_GRID_QUESTION_COVERAGE = 0.62;
   const MIN_GRID_BOX_COVERAGE = 0.36;
   const MIN_GRID_AVERAGE_SCORE = 0.08;
@@ -32,20 +35,39 @@
   const PAPER_LAYOUT_PRIORITY = 650;
   const VIEWFINDER_MARGIN_MIN = 18;
   const VIEWFINDER_MARGIN_RATIO = 0.07;
+  const MAX_CANDIDATES_TO_SCORE = 12;
+  const LOW_CONFIDENCE_STOP_AFTER = 5;
+  const INPUT_MAX_DIMENSION = 1800;
+  const FAST_INPUT_MAX_DIMENSION = 1800;
+  const CAMERA_FRAME_MAX_DIMENSION = 1400;
 
   const BLOCKS = [
-    { startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 },
-    { startQuestion: 6, questionCount: 5, choiceCount: 3, x0: 517.0, dx: 53.0, y0: 88.0, dy: 35.0 },
-    { startQuestion: 11, questionCount: 5, choiceCount: 3, x0: 850.0, dx: 50.0, y0: 101.0, dy: 34.0 },
-    { startQuestion: 16, questionCount: 5, choiceCount: 3, x0: 1163.0, dx: 48.0, y0: 114.0, dy: 33.5 },
-    { startQuestion: 21, questionCount: 5, choiceCount: 4, x0: 163.0, dx: 55.5, y0: 310.0, dy: 36.0 },
-    { startQuestion: 26, questionCount: 5, choiceCount: 4, x0: 518.0, dx: 53.0, y0: 318.0, dy: 35.5 },
-    { startQuestion: 31, questionCount: 5, choiceCount: 4, x0: 856.0, dx: 50.5, y0: 327.0, dy: 35.0 },
-    { startQuestion: 36, questionCount: 5, choiceCount: 7, x0: 1175.0, dx: 48.5, y0: 337.0, dy: 34.0 },
-    { startQuestion: 41, questionCount: 5, choiceCount: 4, x0: 154.0, dx: 56.5, y0: 548.0, dy: 37.5 },
-    { startQuestion: 46, questionCount: 5, choiceCount: 4, x0: 516.0, dx: 54.0, y0: 551.0, dy: 36.8 },
-    { startQuestion: 51, questionCount: 5, choiceCount: 4, x0: 861.0, dx: 51.0, y0: 555.0, dy: 35.6 }
+    scaleBlock({ startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 }),
+    scaleBlock({ startQuestion: 6, questionCount: 5, choiceCount: 3, x0: 517.0, dx: 53.0, y0: 88.0, dy: 35.0 }),
+    scaleBlock({ startQuestion: 11, questionCount: 5, choiceCount: 3, x0: 850.0, dx: 50.0, y0: 101.0, dy: 34.0 }),
+    scaleBlock({ startQuestion: 16, questionCount: 5, choiceCount: 3, x0: 1163.0, dx: 48.0, y0: 114.0, dy: 33.5 }),
+    scaleBlock({ startQuestion: 21, questionCount: 5, choiceCount: 4, x0: 163.0, dx: 55.5, y0: 310.0, dy: 36.0 }),
+    scaleBlock({ startQuestion: 26, questionCount: 5, choiceCount: 4, x0: 518.0, dx: 53.0, y0: 318.0, dy: 35.5 }),
+    scaleBlock({ startQuestion: 31, questionCount: 5, choiceCount: 4, x0: 856.0, dx: 50.5, y0: 327.0, dy: 35.0 }),
+    scaleBlock({ startQuestion: 36, questionCount: 5, choiceCount: 7, x0: 1175.0, dx: 48.5, y0: 337.0, dy: 34.0 }),
+    scaleBlock({ startQuestion: 41, questionCount: 5, choiceCount: 4, x0: 154.0, dx: 56.5, y0: 548.0, dy: 37.5 }),
+    scaleBlock({ startQuestion: 46, questionCount: 5, choiceCount: 4, x0: 516.0, dx: 54.0, y0: 551.0, dy: 36.8 }),
+    scaleBlock({ startQuestion: 51, questionCount: 5, choiceCount: 4, x0: 861.0, dx: 51.0, y0: 555.0, dy: 35.6 })
   ];
+
+  function scaleBlock(block) {
+    return {
+      ...block,
+      x0: block.x0 * RECOGNITION_SCALE,
+      y0: block.y0 * RECOGNITION_SCALE,
+      dx: block.dx * RECOGNITION_SCALE,
+      dy: block.dy * RECOGNITION_SCALE
+    };
+  }
+
+  function px(value) {
+    return Math.max(1, Math.round(value * RECOGNITION_SCALE));
+  }
 
   const state = {
     stream: null,
@@ -215,7 +237,10 @@
     const height = el.video.videoHeight || 720;
     const sourceRect = visibleVideoSourceRect(width, height);
     const frameRect = innerViewfinderSourceRect(sourceRect);
-    const canvas = makeCanvas(frameRect.width, frameRect.height);
+    const frameScale = Math.min(1, CAMERA_FRAME_MAX_DIMENSION / Math.max(frameRect.width, frameRect.height));
+    const outputWidth = Math.max(1, Math.round(frameRect.width * frameScale));
+    const outputHeight = Math.max(1, Math.round(frameRect.height * frameScale));
+    const canvas = makeCanvas(outputWidth, outputHeight);
     canvas.getContext("2d", { willReadFrequently: true }).drawImage(
       el.video,
       frameRect.x,
@@ -224,8 +249,8 @@
       frameRect.height,
       0,
       0,
-      frameRect.width,
-      frameRect.height
+      outputWidth,
+      outputHeight
     );
     return canvas;
   }
@@ -285,17 +310,20 @@
 
     const startedAt = performance.now();
     try {
-      const output = grade(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES);
+      const output = sourceName === "相机"
+        ? gradeCameraFrame(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES)
+        : grade(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES);
       state.lastOutput = output;
       drawResult(output);
       updateMetrics(output);
       renderQuestions(output.questions);
       el.saveResultButton.disabled = false;
       const elapsed = Math.round(performance.now() - startedAt);
+      const modeText = output.fastMode ? "快速模式，" : "";
       if (output.sheetValidation.lowConfidence) {
-        setStatus(`低置信度出分：${output.sheetValidation.summary}，请抽查预览框是否对齐，耗时 ${elapsed}ms`, "warn");
+        setStatus(`低置信度出分：${modeText}${output.sheetValidation.summary}，请抽查预览框是否对齐，耗时 ${elapsed}ms`, "warn");
       } else {
-        setStatus(`扫描成功：${output.sheetValidation.summary}，耗时 ${elapsed}ms`, "good");
+        setStatus(`扫描成功：${modeText}${output.sheetValidation.summary}，耗时 ${elapsed}ms`, "good");
       }
       completeScan(output);
     } catch (error) {
@@ -360,51 +388,56 @@
     await startScan();
   }
 
-  function grade(sourceCanvas, answerKeyText, scoreRuleText) {
+  function gradeCameraFrame(sourceCanvas, answerKeyText, scoreRuleText) {
+    try {
+      const fastOutput = grade(sourceCanvas, answerKeyText, scoreRuleText, {
+        inputMaxDimension: FAST_INPUT_MAX_DIMENSION,
+        maxCandidates: 3,
+        fastCamera: true
+      });
+      if (isFastCameraResult(fastOutput)) {
+        fastOutput.fastMode = true;
+        return fastOutput;
+      }
+    } catch {
+      // Fall through to full recognition. Fast mode is only an optimization.
+    }
+    return grade(sourceCanvas, answerKeyText, scoreRuleText);
+  }
+
+  function isFastCameraResult(output) {
+    if (!output || !output.sheetValidation || output.sheetValidation.lowConfidence) {
+      return false;
+    }
+    const grid = output.sheetValidation.grid;
+    return output.recognizedCount >= 55
+      && grid.questionCoverage >= 0.70
+      && grid.boxCoverage >= 0.52
+      && grid.averageScore >= 0.10;
+  }
+
+  function grade(sourceCanvas, answerKeyText, scoreRuleText, options = {}) {
     const answerKey = parseAnswerKey(answerKeyText);
     const pointValues = parseScoreRules(scoreRuleText, QUESTION_COUNT);
-    const candidates = buildCandidates(sourceCanvas);
+    const candidates = buildCandidates(sourceCanvas, options);
     if (!candidates.length) {
       throw new Error("没有找到有效图像");
     }
 
-    const scoredCandidates = [];
-    for (const candidate of candidates) {
-      const gray = new GrayImage(candidate.canvas);
-      const global = findGlobalAlignment(gray);
-      scoredCandidates.push({ candidate, gray, global, quickQuality: global.quality + (candidate.priority || 0) });
-    }
-    scoredCandidates.sort((a, b) => b.quickQuality - a.quickQuality);
-
-    const shortlist = [];
-    for (const scored of scoredCandidates.slice(0, 8)) {
-      pushUniqueScored(shortlist, scored);
-    }
-    let baselineCount = 0;
-    for (const scored of scoredCandidates) {
-      if ((scored.candidate.priority || 0) !== 0) {
-        continue;
-      }
-      if (pushUniqueScored(shortlist, scored)) {
-        baselineCount += 1;
-      }
-      if (baselineCount >= 6 || shortlist.length >= 14) {
-        break;
-      }
-    }
+    const orderedCandidates = orderCandidatesForRecognition(candidates);
 
     let bestOutput = null;
     let bestQuality = -Infinity;
     let bestRejected = null;
-    for (const scored of shortlist) {
-      const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues);
+    let processedCandidates = 0;
+    const maxCandidates = options.maxCandidates || MAX_CANDIDATES_TO_SCORE;
+    const limit = Math.min(orderedCandidates.length, maxCandidates);
+    for (const candidate of orderedCandidates.slice(0, limit)) {
+      const scored = scoreCandidate(candidate, options);
+      processedCandidates += 1;
+      const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues, options);
       output.sheetValidation = evaluateSheet(scored.gray, output);
-      const quality = output.sheetValidation.score * 1400.0
-        + output.sheetValidation.grid.questionCoverage * 1600.0
-        + output.sheetValidation.grid.boxCoverage * 700.0
-        + output.recognizedCount * 100.0
-        + output.layoutConfidence * 20.0
-        + scored.quickQuality * 0.05;
+      const quality = outputQuality(output, scored);
       if (!output.sheetValidation.valid) {
         if (!bestRejected || quality > bestRejected.quality) {
           bestRejected = { output, quality };
@@ -415,13 +448,106 @@
         bestOutput = output;
         bestQuality = quality;
       }
+      if (shouldReturnEarly(output, processedCandidates)) {
+        bestOutput.processedCandidates = processedCandidates;
+        return bestOutput;
+      }
+      if (bestOutput.sheetValidation.lowConfidence && processedCandidates >= LOW_CONFIDENCE_STOP_AFTER) {
+        break;
+      }
     }
 
     if (!bestOutput) {
       const detail = bestRejected ? `（${bestRejected.output.sheetValidation.summary}）` : "";
       throw new Error(`未检测到完整选择题答题框，请把选择题区域完整放进取景框${detail}`);
     }
+    bestOutput.processedCandidates = processedCandidates;
     return bestOutput;
+  }
+
+  function orderCandidatesForRecognition(candidates) {
+    const items = candidates.map((candidate, index) => ({ candidate, index }));
+    const byPriority = (a, b) => {
+      const priorityDelta = (b.candidate.priority || 0) - (a.candidate.priority || 0);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+      return a.index - b.index;
+    };
+    const choice = items.filter((item) => item.candidate.note.includes(" choice=")).sort(byPriority);
+    const paper = items.filter((item) => item.candidate.note.includes("paper-")).sort(byPriority);
+    const baseline = items
+      .filter((item) => !item.candidate.note.includes(" choice=") && !item.candidate.note.includes("paper-"))
+      .sort((a, b) => baselineCandidateScore(b.candidate) - baselineCandidateScore(a.candidate) || a.index - b.index);
+
+    const ordered = [];
+    takeCandidates(ordered, choice, 2);
+    takeCandidates(ordered, paper, 1);
+    takeCandidates(ordered, baseline, 9);
+    takeCandidates(ordered, choice, 2);
+    takeCandidates(ordered, paper, 2);
+    takeCandidates(ordered, baseline, baseline.length);
+    takeCandidates(ordered, choice, choice.length);
+    takeCandidates(ordered, paper, paper.length);
+    return ordered.map((item) => item.candidate);
+  }
+
+  function takeCandidates(target, source, count) {
+    for (const item of source) {
+      if (count <= 0) {
+        return;
+      }
+      if (target.some((kept) => kept.candidate === item.candidate)) {
+        continue;
+      }
+      target.push(item);
+      count -= 1;
+    }
+  }
+
+  function baselineCandidateScore(candidate) {
+    let score = candidate.priority || 0;
+    const note = candidate.note || "";
+    if ((note.includes("rot=90") || note.includes("rot=270")) && note.includes("aspect-y=0.50")) {
+      score += 130;
+    } else if (note.includes("crop=")) {
+      score += 80;
+    } else if (note.includes("aspect-")) {
+      score += 60;
+    } else if (note.includes("full")) {
+      score += 45;
+    }
+    if (note.includes("rot=90") || note.includes("rot=270")) {
+      score += 70;
+    }
+    return score;
+  }
+
+  function scoreCandidate(candidate, options = {}) {
+    const gray = new GrayImage(candidate.canvas);
+    const global = findGlobalAlignment(gray, options);
+    return { candidate, gray, global, quickQuality: global.quality + (candidate.priority || 0) };
+  }
+
+  function outputQuality(output, scored) {
+    return output.sheetValidation.score * 1400.0
+      + output.sheetValidation.grid.questionCoverage * 1600.0
+      + output.sheetValidation.grid.boxCoverage * 700.0
+      + output.recognizedCount * 100.0
+      + output.layoutConfidence * 20.0
+      + scored.quickQuality * 0.05;
+  }
+
+  function shouldReturnEarly(output, processedCandidates) {
+    if (!output.sheetValidation.valid || output.sheetValidation.lowConfidence) {
+      return false;
+    }
+    const grid = output.sheetValidation.grid;
+    return output.recognizedCount >= 54
+      && grid.questionCoverage >= 0.70
+      && grid.boxCoverage >= 0.50
+      && grid.averageScore >= 0.10
+      && processedCandidates <= 4;
   }
 
   function parseAnswerKey(text) {
@@ -483,8 +609,11 @@
     return points;
   }
 
-  function buildCandidates(sourceCanvas) {
-    const fitted = fitCanvas(sourceCanvas, 1800);
+  function buildCandidates(sourceCanvas, options = {}) {
+    const fitted = fitCanvas(sourceCanvas, options.inputMaxDimension || INPUT_MAX_DIMENSION);
+    if (options.fastCamera) {
+      return buildFastCameraCandidates(fitted);
+    }
     const candidates = [];
     const sourcePortrait = fitted.height > fitted.width * 1.12;
     for (const degrees of preferredRotations(fitted)) {
@@ -522,6 +651,43 @@
     return candidates;
   }
 
+  function buildFastCameraCandidates(fitted) {
+    const candidates = [];
+    for (const degrees of preferredRotations(fitted).slice(0, 3)) {
+      const rotated = rotateCanvas(fitted, degrees);
+      addCanonicalCandidate(rotated, `rot=${degrees} fast-full`, candidates, 260);
+      addCenterAspectCandidate(rotated, degrees, candidates, 240);
+      const cropped = autoCrop(rotated);
+      if (cropped) {
+        addCanonicalCandidate(
+          cropped.canvas,
+          `rot=${degrees} fast-crop=${cropped.x},${cropped.y} ${cropped.width}x${cropped.height}`,
+          candidates,
+          250
+        );
+      }
+      if (candidates.length >= 6) {
+        break;
+      }
+    }
+    return candidates;
+  }
+
+  function addCenterAspectCandidate(canvas, degrees, candidates, priority = 0) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const aspect = width / height;
+    if (aspect > TARGET_ASPECT) {
+      const cropWidth = Math.max(1, Math.min(width, Math.round(height * TARGET_ASPECT)));
+      const x = Math.round((width - cropWidth) / 2);
+      addCanonicalCandidate(cropCanvas(canvas, x, 0, cropWidth, height), `rot=${degrees} fast-aspect-x=0.50`, candidates, priority);
+    } else {
+      const cropHeight = Math.max(1, Math.min(height, Math.round(width / TARGET_ASPECT)));
+      const y = Math.round((height - cropHeight) / 2);
+      addCanonicalCandidate(cropCanvas(canvas, 0, y, width, cropHeight), `rot=${degrees} fast-aspect-y=0.50`, candidates, priority);
+    }
+  }
+
   function addPaperLayoutCandidates(canvas, degrees, candidates) {
     const width = canvas.width;
     const height = canvas.height;
@@ -532,9 +698,7 @@
         { x: 0.030, y: 0.145, w: 0.940, h: 0.360, weight: 1.00 },
         { x: 0.025, y: 0.155, w: 0.950, h: 0.335, weight: 0.98 },
         { x: 0.035, y: 0.170, w: 0.930, h: 0.340, weight: 0.96 },
-        { x: 0.030, y: 0.125, w: 0.940, h: 0.390, weight: 0.92 },
-        { x: 0.045, y: 0.160, w: 0.910, h: 0.355, weight: 0.88 },
-        { x: 0.020, y: 0.110, w: 0.960, h: 0.420, weight: 0.82 }
+        { x: 0.030, y: 0.125, w: 0.940, h: 0.390, weight: 0.92 }
       ];
       for (const spec of specs) {
         addRelativeCropCandidate(canvas, degrees, candidates, spec, "paper-portrait");
@@ -877,7 +1041,7 @@
     };
   }
 
-  function gradeCanonical(candidate, gray, global, answerKey, pointValues) {
+  function gradeCanonical(candidate, gray, global, answerKey, pointValues, options = {}) {
     const output = {
       canonicalCanvas: candidate.canvas,
       questions: [],
@@ -895,7 +1059,7 @@
     let alignNote = ` global=(${global.offsetX},${global.offsetY})`;
 
     for (const block of BLOCKS) {
-      const alignment = findBlockAlignment(gray, block, global);
+      const alignment = findBlockAlignment(gray, block, global, options);
       totalConfidence += alignment.confidenceSum;
       alignNote += ` ${block.startQuestion}:${alignment.offsetX},${alignment.offsetY}`;
 
@@ -960,7 +1124,7 @@
   }
 
   function evaluateSheet(gray, output) {
-    const content = { x1: 40, y1: 35, x2: gray.width - 41, y2: gray.height - 36 };
+    const content = { x1: px(40), y1: px(35), x2: gray.width - px(41), y2: gray.height - px(36) };
     const pageMean = gray.mean(content);
     const veryDarkFraction = gray.fractionBelow(content, 70);
     const darkFraction = gray.fractionBelow(content, 110);
@@ -1062,16 +1226,16 @@
   }
 
   function optionBoxStructureScore(gray, cx, cy) {
-    const outer = rectI(cx, cy, 28, 18, gray.width, gray.height);
+    const outer = rectI(cx, cy, px(28), px(18), gray.width, gray.height);
     if (rectArea(outer) <= 0) {
       return 0;
     }
     const local = gray.mean(outer);
     const threshold = clamp(local - 30, 70, 150);
-    const top = gray.fractionBelow(rectI(cx, cy - 10, 18, 1, gray.width, gray.height), threshold);
-    const bottom = gray.fractionBelow(rectI(cx, cy + 10, 18, 1, gray.width, gray.height), threshold);
-    const left = gray.fractionBelow(rectI(cx - 18, cy, 1, 10, gray.width, gray.height), threshold);
-    const right = gray.fractionBelow(rectI(cx + 18, cy, 1, 10, gray.width, gray.height), threshold);
+    const top = gray.fractionBelow(rectI(cx, cy - px(10), px(18), 1, gray.width, gray.height), threshold);
+    const bottom = gray.fractionBelow(rectI(cx, cy + px(10), px(18), 1, gray.width, gray.height), threshold);
+    const left = gray.fractionBelow(rectI(cx - px(18), cy, 1, px(10), gray.width, gray.height), threshold);
+    const right = gray.fractionBelow(rectI(cx + px(18), cy, 1, px(10), gray.width, gray.height), threshold);
     const horizontalPair = Math.min(top, bottom);
     const verticalPair = Math.min(left, right);
     const edgeAverage = (top + bottom + left + right) / 4;
@@ -1080,10 +1244,10 @@
   }
 
   function estimateFrame(gray) {
-    const top = strongestHorizontalLine(gray, 5, 120, 40, gray.width - 41);
-    const bottom = strongestHorizontalLine(gray, gray.height - 130, gray.height - 6, 40, gray.width - 41);
-    const left = strongestVerticalLine(gray, 5, 150, 40, gray.height - 41);
-    const right = strongestVerticalLine(gray, gray.width - 160, gray.width - 6, 40, gray.height - 41);
+    const top = strongestHorizontalLine(gray, px(5), px(120), px(40), gray.width - px(41));
+    const bottom = strongestHorizontalLine(gray, gray.height - px(130), gray.height - px(6), px(40), gray.width - px(41));
+    const left = strongestVerticalLine(gray, px(5), px(150), px(40), gray.height - px(41));
+    const right = strongestVerticalLine(gray, gray.width - px(160), gray.width - px(6), px(40), gray.height - px(41));
     const values = [top, bottom, left, right];
     const count = values.filter((value) => value >= 0.16).length;
     const score = values.reduce((sum, value) => sum + clamp(value / 0.28, 0, 1), 0) / 4;
@@ -1097,7 +1261,7 @@
     const left = clamp(Math.round(x1), 0, gray.width - 1);
     const right = clamp(Math.round(x2), 0, gray.width - 1);
     for (let y = start; y <= end; y += 1) {
-      const rect = { x1: left, y1: y, x2: right, y2: Math.min(gray.height - 1, y + 2) };
+      const rect = { x1: left, y1: y, x2: right, y2: Math.min(gray.height - 1, y + px(2)) };
       best = Math.max(best, gray.fractionBelow(rect, 95));
     }
     return best;
@@ -1110,16 +1274,19 @@
     const top = clamp(Math.round(y1), 0, gray.height - 1);
     const bottom = clamp(Math.round(y2), 0, gray.height - 1);
     for (let x = start; x <= end; x += 1) {
-      const rect = { x1: x, y1: top, x2: Math.min(gray.width - 1, x + 2), y2: bottom };
+      const rect = { x1: x, y1: top, x2: Math.min(gray.width - 1, x + px(2)), y2: bottom };
       best = Math.max(best, gray.fractionBelow(rect, 95));
     }
     return best;
   }
 
-  function findGlobalAlignment(gray) {
+  function findGlobalAlignment(gray, options = {}) {
     let best = null;
-    for (let ox = -120; ox <= 120; ox += 20) {
-      for (let oy = -90; oy <= 90; oy += 20) {
+    const xRange = px(120);
+    const yRange = px(90);
+    const step = px(options.fastAlignment ? 40 : 30);
+    for (let ox = -xRange; ox <= xRange; ox += step) {
+      for (let oy = -yRange; oy <= yRange; oy += step) {
         let boxSum = 0;
         let confidenceSum = 0;
         for (const block of BLOCKS) {
@@ -1144,10 +1311,12 @@
     return best || { offsetX: 0, offsetY: 0, recognizedCount: 0, confidenceSum: 0, quality: 0 };
   }
 
-  function findBlockAlignment(gray, block, global) {
+  function findBlockAlignment(gray, block, global, options = {}) {
     let best = null;
-    for (let ox = global.offsetX - 35; ox <= global.offsetX + 35; ox += 5) {
-      for (let oy = global.offsetY - 35; oy <= global.offsetY + 35; oy += 5) {
+    const range = px(options.fastAlignment ? 28 : 35);
+    const step = px(options.fastAlignment ? 10 : 7);
+    for (let ox = global.offsetX - range; ox <= global.offsetX + range; ox += step) {
+      for (let oy = global.offsetY - range; oy <= global.offsetY + range; oy += step) {
         let recognized = 0;
         let boxSum = 0;
         let confidenceSum = 0;
@@ -1180,8 +1349,8 @@
   }
 
   function fillScore(gray, cx, cy) {
-    const outer = rectI(cx, cy, 30, 20, gray.width, gray.height);
-    const inner = rectI(cx, cy, 11, 6, gray.width, gray.height);
+    const outer = rectI(cx, cy, px(30), px(20), gray.width, gray.height);
+    const inner = rectI(cx, cy, px(11), px(6), gray.width, gray.height);
     if (rectArea(inner) <= 0 || rectArea(outer) <= 0) {
       return 0;
     }
@@ -1193,8 +1362,8 @@
   }
 
   function boxScore(gray, cx, cy) {
-    const outer = rectI(cx, cy, 34, 22, gray.width, gray.height);
-    const region = rectI(cx, cy, 20, 12, gray.width, gray.height);
+    const outer = rectI(cx, cy, px(34), px(22), gray.width, gray.height);
+    const region = rectI(cx, cy, px(20), px(12), gray.width, gray.height);
     if (rectArea(region) <= 0 || rectArea(outer) <= 0) {
       return 0;
     }
@@ -1223,14 +1392,6 @@
       }
     }
     return second;
-  }
-
-  function pushUniqueScored(list, scored) {
-    if (list.some((item) => item.candidate === scored.candidate)) {
-      return false;
-    }
-    list.push(scored);
-    return true;
   }
 
   class GrayImage {
