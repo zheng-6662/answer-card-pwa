@@ -39,7 +39,7 @@
         </label>
       </div>
 
-      <p id="statusText" class="status-text">请先填写标答和分值，或直接扫描只识别选项。</p>
+      <p id="statusText" class="status-text">标答和分值已预置，点击开始扫描后对准完整答题卡。</p>
     </section>
 
     <section class="summary-grid" aria-label="当前结果">
@@ -57,15 +57,22 @@
       </div>
     </section>
 
-    <section class="settings-panel" aria-label="设置">
-      <label class="field-block">
-        <span>正确答案</span>
-        <textarea id="answerKeyInput" rows="3" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="1:A 2:B 3:C，或 ABCDBAC..."></textarea>
-      </label>
-      <label class="field-block">
-        <span>每题分值</span>
-        <textarea id="scoreRuleInput" rows="2" autocomplete="off" spellcheck="false">1-20:1.5 21-40:2.5 41-55:1</textarea>
-      </label>
+    <section id="successPanel" class="success-panel" aria-label="扫描成功" hidden>
+      <p class="success-kicker">扫描成功</p>
+      <strong id="successScore">--</strong>
+      <p id="successDetail">已完成判分。</p>
+      <button id="nextScanButton" class="primary-button" type="button">下一份扫描</button>
+    </section>
+
+    <section class="settings-panel preset-panel" aria-label="预置设置">
+      <div class="field-block">
+        <span>正确答案已预置</span>
+        <p id="presetAnswerText" class="preset-text"></p>
+      </div>
+      <div class="field-block">
+        <span>每题分值已预置</span>
+        <p id="presetScoreText" class="preset-text"></p>
+      </div>
     </section>
 
     <section class="preview-panel" aria-label="识别预览">

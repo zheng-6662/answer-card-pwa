@@ -80,6 +80,7 @@ h2 {
 
 .scanner-panel,
 .settings-panel,
+.success-panel,
 .preview-panel,
 .results-panel,
 .history-panel {
@@ -243,11 +244,52 @@ h2 {
 }
 
 .settings-panel,
+.success-panel,
 .preview-panel,
 .results-panel,
 .history-panel {
   margin-top: 12px;
   padding: 14px;
+}
+
+.success-panel[hidden] {
+  display: none;
+}
+
+.success-panel {
+  display: grid;
+  gap: 10px;
+  border-color: rgba(19, 138, 82, 0.28);
+  background: linear-gradient(180deg, #ffffff 0%, #f2fbf6 100%);
+}
+
+.success-kicker {
+  margin: 0;
+  color: var(--green);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+#successScore {
+  display: block;
+  font-size: clamp(34px, 12vw, 54px);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+#successDetail,
+.preset-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.preset-text {
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
 }
 
 .field-block {

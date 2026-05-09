@@ -9,6 +9,22 @@
   const MIN_CONFIDENCE = 0.06;
   const TARGET_ASPECT = CANONICAL_WIDTH / CANONICAL_HEIGHT;
   const SCAN_INTERVAL_MS = 1800;
+  const PRESET_ANSWER_GROUPS = [
+    "1-5 CBAAC",
+    "6-10 CCAAC",
+    "11-15 CCBBC",
+    "16-20 BBBAA",
+    "21-25 ADBCA",
+    "26-30 BCBDD",
+    "31-35 ADCAD",
+    "36-40 BECAD",
+    "41-45 CDABB",
+    "46-50 CDAAD",
+    "51-55 BDACB"
+  ];
+  const PRESET_ANSWER_KEY = "CBAACCCAACCCBBCBBBAAADBCABCBDDADCADBECADCDABBCDAADBDACB";
+  const PRESET_SCORE_RULES = "1-20:1.5 21-40:2.5 41-55:1";
+  const COMPLETE_SCAN_MIN_RECOGNIZED = 46;
 
   const BLOCKS = [
     { startQuestion: 1, questionCount: 5, choiceCount: 3, x0: 178.0, dx: 55.0, y0: 82.0, dy: 35.3 },
@@ -59,8 +75,12 @@
       scoreMetric: document.getElementById("scoreMetric"),
       recognizedMetric: document.getElementById("recognizedMetric"),
       correctMetric: document.getElementById("correctMetric"),
-      answerKeyInput: document.getElementById("answerKeyInput"),
-      scoreRuleInput: document.getElementById("scoreRuleInput"),
+      presetAnswerText: document.getElementById("presetAnswerText"),
+      presetScoreText: document.getElementById("presetScoreText"),
+      successPanel: document.getElementById("successPanel"),
+      successScore: document.getElementById("successScore"),
+      successDetail: document.getElementById("successDetail"),
+      nextScanButton: document.getElementById("nextScanButton"),
       resultCanvas: document.getElementById("resultCanvas"),
       questionRows: document.getElementById("questionRows"),
       historyRows: document.getElementById("historyRows"),
@@ -85,8 +105,7 @@
     el.fileInput.addEventListener("change", handleFile);
     el.saveResultButton.addEventListener("click", saveCurrentResult);
     el.clearHistoryButton.addEventListener("click", clearHistory);
-    el.answerKeyInput.addEventListener("input", saveSettings);
-    el.scoreRuleInput.addEventListener("input", saveSettings);
+    el.nextScanButton.addEventListener("click", startNextScan);
     el.installButton.addEventListener("click", async () => {
       if (!state.deferredPrompt) {
         return;
@@ -99,18 +118,13 @@
   }
 
   function loadSettings() {
-    el.answerKeyInput.value = localStorage.getItem("answer-card.answerKey") || "";
-    el.scoreRuleInput.value = localStorage.getItem("answer-card.scoreRules") || el.scoreRuleInput.value;
+    el.presetAnswerText.textContent = PRESET_ANSWER_GROUPS.join("  ");
+    el.presetScoreText.textContent = "1-20 每题 1.5 分；21-40 每题 2.5 分；41-55 每题 1 分";
     try {
       state.history = JSON.parse(localStorage.getItem("answer-card.history") || "[]");
     } catch {
       state.history = [];
     }
-  }
-
-  function saveSettings() {
-    localStorage.setItem("answer-card.answerKey", el.answerKeyInput.value);
-    localStorage.setItem("answer-card.scoreRules", el.scoreRuleInput.value);
   }
 
   async function startScan() {
@@ -139,6 +153,7 @@
       el.video.srcObject = state.stream;
       await el.video.play();
       state.scanning = true;
+      hideSuccessPanel();
       el.cameraEmpty.classList.add("hidden");
       setStatus("扫描中：把答题卡完整放进画面，停稳后会自动刷新。");
       drawCameraFrame();
@@ -149,7 +164,7 @@
     }
   }
 
-  function stopScan() {
+  function stopScan(options = {}) {
     state.scanning = false;
     clearTimeout(state.scanTimer);
     state.scanTimer = null;
@@ -161,7 +176,9 @@
     state.stream = null;
     el.video.srcObject = null;
     el.cameraEmpty.classList.remove("hidden");
-    setStatus("扫描已停止。");
+    if (!options.silent) {
+      setStatus("扫描已停止。");
+    }
     drawCameraFrame();
   }
 
@@ -221,20 +238,62 @@
 
     const startedAt = performance.now();
     try {
-      const output = grade(canvas, el.answerKeyInput.value, el.scoreRuleInput.value);
+      const output = grade(canvas, PRESET_ANSWER_KEY, PRESET_SCORE_RULES);
       state.lastOutput = output;
       drawResult(output);
       updateMetrics(output);
       renderQuestions(output.questions);
       el.saveResultButton.disabled = false;
       const elapsed = Math.round(performance.now() - startedAt);
-      setStatus(`识别完成：${output.cropNote}，耗时 ${elapsed}ms`, "good");
+      setStatus(`扫描成功：${output.sheetValidation.summary}，耗时 ${elapsed}ms`, "good");
+      completeScan(output);
     } catch (error) {
-      setStatus(`识别失败：${cleanMessage(error)}`, "bad");
+      const message = cleanMessage(error);
+      setStatus(message.includes("完整答题卡") ? message : `识别失败：${message}`, message.includes("完整答题卡") ? "warn" : "bad");
     } finally {
       state.processing = false;
       drawCameraFrame(false);
     }
+  }
+
+  function completeScan(output) {
+    stopScan({ silent: true });
+    showSuccessPanel(output);
+    addHistoryItem(output);
+    renderHistory();
+    setTimeout(() => {
+      el.successPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+  }
+
+  function showSuccessPanel(output) {
+    el.successPanel.hidden = false;
+    if (output.gradedCount > 0) {
+      el.successScore.textContent = `${formatNumber(output.earnedPoints)} / ${formatNumber(output.totalPossiblePoints)}`;
+      el.successDetail.textContent = `正确 ${output.correctCount}/${output.gradedCount}，识别 ${output.recognizedCount}/55，${output.scorePercent.toFixed(1)}%。`;
+    } else {
+      el.successScore.textContent = `${output.recognizedCount}/55`;
+      el.successDetail.textContent = "未配置标答，仅显示识别题数。";
+    }
+  }
+
+  function hideSuccessPanel() {
+    el.successPanel.hidden = true;
+  }
+
+  function resetCurrentResult() {
+    state.lastOutput = null;
+    updateMetrics(null);
+    renderQuestions([]);
+    drawEmptyResult();
+    el.saveResultButton.disabled = true;
+  }
+
+  async function startNextScan() {
+    hideSuccessPanel();
+    resetCurrentResult();
+    setStatus("准备扫描下一份。");
+    await startScan();
   }
 
   function grade(sourceCanvas, answerKeyText, scoreRuleText) {
@@ -254,9 +313,20 @@
 
     let bestOutput = null;
     let bestQuality = -Infinity;
+    let bestRejected = null;
     for (const scored of shortlist) {
       const output = gradeCanonical(scored.candidate, scored.gray, scored.global, answerKey, pointValues);
-      const quality = output.recognizedCount * 100.0 + output.layoutConfidence * 20.0 + scored.quickQuality * 0.05;
+      output.sheetValidation = evaluateSheet(scored.gray, output);
+      const quality = output.sheetValidation.score * 800.0
+        + output.recognizedCount * 100.0
+        + output.layoutConfidence * 20.0
+        + scored.quickQuality * 0.05;
+      if (!output.sheetValidation.valid) {
+        if (!bestRejected || quality > bestRejected.quality) {
+          bestRejected = { output, quality };
+        }
+        continue;
+      }
       if (!bestOutput || quality > bestQuality) {
         bestOutput = output;
         bestQuality = quality;
@@ -264,7 +334,8 @@
     }
 
     if (!bestOutput) {
-      throw new Error("无法生成识别结果");
+      const detail = bestRejected ? `（${bestRejected.output.sheetValidation.summary}）` : "";
+      throw new Error(`未检测到完整答题卡，请把整张答题卡放进画面${detail}`);
     }
     return bestOutput;
   }
@@ -516,6 +587,86 @@
       output.scorePercent = (100 * output.earnedPoints) / output.totalPossiblePoints;
     }
     return output;
+  }
+
+  function evaluateSheet(gray, output) {
+    const content = { x1: 40, y1: 35, x2: gray.width - 41, y2: gray.height - 36 };
+    const pageMean = gray.mean(content);
+    const veryDarkFraction = gray.fractionBelow(content, 70);
+    const darkFraction = gray.fractionBelow(content, 110);
+    const frame = estimateFrame(gray);
+    const averageConfidence = output.questions.reduce((sum, question) => sum + Math.max(0, question.confidence), 0) / QUESTION_COUNT;
+    const recognizedRatio = output.recognizedCount / QUESTION_COUNT;
+
+    const problems = [];
+    if (output.recognizedCount < COMPLETE_SCAN_MIN_RECOGNIZED) {
+      problems.push(`识别题数不足 ${output.recognizedCount}/55`);
+    }
+    if (pageMean < 138) {
+      problems.push("画面整体过暗");
+    }
+    if (veryDarkFraction > 0.24 || darkFraction > 0.42) {
+      problems.push("画面里非答题卡区域过多");
+    }
+    if (frame.count < 2 && frame.score < 0.55) {
+      problems.push("没有检测到完整答题卡边框");
+    }
+
+    const score = clamp((pageMean - 120) / 80, 0, 1.4)
+      + clamp((0.42 - darkFraction) * 3.0, -1.0, 1.2)
+      + frame.score
+      + recognizedRatio
+      + clamp(averageConfidence * 2.0, 0, 1.2);
+
+    const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，识别 ${output.recognizedCount}/55`;
+    return {
+      valid: problems.length === 0,
+      problems,
+      score,
+      pageMean,
+      veryDarkFraction,
+      darkFraction,
+      frame,
+      averageConfidence,
+      summary
+    };
+  }
+
+  function estimateFrame(gray) {
+    const top = strongestHorizontalLine(gray, 5, 120, 40, gray.width - 41);
+    const bottom = strongestHorizontalLine(gray, gray.height - 130, gray.height - 6, 40, gray.width - 41);
+    const left = strongestVerticalLine(gray, 5, 150, 40, gray.height - 41);
+    const right = strongestVerticalLine(gray, gray.width - 160, gray.width - 6, 40, gray.height - 41);
+    const values = [top, bottom, left, right];
+    const count = values.filter((value) => value >= 0.16).length;
+    const score = values.reduce((sum, value) => sum + clamp(value / 0.28, 0, 1), 0) / 4;
+    return { top, bottom, left, right, count, score };
+  }
+
+  function strongestHorizontalLine(gray, yStart, yEnd, x1, x2) {
+    let best = 0;
+    const start = clamp(Math.round(yStart), 0, gray.height - 1);
+    const end = clamp(Math.round(yEnd), 0, gray.height - 1);
+    const left = clamp(Math.round(x1), 0, gray.width - 1);
+    const right = clamp(Math.round(x2), 0, gray.width - 1);
+    for (let y = start; y <= end; y += 1) {
+      const rect = { x1: left, y1: y, x2: right, y2: Math.min(gray.height - 1, y + 2) };
+      best = Math.max(best, gray.fractionBelow(rect, 95));
+    }
+    return best;
+  }
+
+  function strongestVerticalLine(gray, xStart, xEnd, y1, y2) {
+    let best = 0;
+    const start = clamp(Math.round(xStart), 0, gray.width - 1);
+    const end = clamp(Math.round(xEnd), 0, gray.width - 1);
+    const top = clamp(Math.round(y1), 0, gray.height - 1);
+    const bottom = clamp(Math.round(y2), 0, gray.height - 1);
+    for (let x = start; x <= end; x += 1) {
+      const rect = { x1: x, y1: top, x2: Math.min(gray.width - 1, x + 2), y2: bottom };
+      best = Math.max(best, gray.fractionBelow(rect, 95));
+    }
+    return best;
   }
 
   function findGlobalAlignment(gray) {
@@ -935,17 +1086,25 @@
     if (!output) {
       return;
     }
+    addHistoryItem(output);
+    renderHistory();
+    setStatus("当前结果已保存。", "good");
+  }
+
+  function addHistoryItem(output) {
     const item = {
       time: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
       score: output.gradedCount > 0 ? `${formatNumber(output.earnedPoints)}/${formatNumber(output.totalPossiblePoints)}` : "--",
       recognized: `${output.recognizedCount}/55`,
       correct: output.gradedCount > 0 ? `${output.correctCount}/${output.gradedCount}` : "--"
     };
+    const last = state.history[0];
+    if (last && last.score === item.score && last.recognized === item.recognized && last.correct === item.correct) {
+      return;
+    }
     state.history.unshift(item);
     state.history = state.history.slice(0, 30);
     localStorage.setItem("answer-card.history", JSON.stringify(state.history));
-    renderHistory();
-    setStatus("当前结果已保存。", "good");
   }
 
   function clearHistory() {
