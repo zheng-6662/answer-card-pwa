@@ -292,7 +292,11 @@
       renderQuestions(output.questions);
       el.saveResultButton.disabled = false;
       const elapsed = Math.round(performance.now() - startedAt);
-      setStatus(`扫描成功：${output.sheetValidation.summary}，耗时 ${elapsed}ms`, "good");
+      if (output.sheetValidation.lowConfidence) {
+        setStatus(`低置信度出分：${output.sheetValidation.summary}，请抽查预览框是否对齐，耗时 ${elapsed}ms`, "warn");
+      } else {
+        setStatus(`扫描成功：${output.sheetValidation.summary}，耗时 ${elapsed}ms`, "good");
+      }
       completeScan(output);
     } catch (error) {
       const message = cleanMessage(error);
@@ -310,6 +314,8 @@
     updateMetrics(null);
     renderQuestions([]);
     drawEmptyResult();
+    el.successScore.textContent = "--";
+    el.successDetail.textContent = "已完成判分。";
     el.saveResultButton.disabled = true;
   }
 
@@ -327,7 +333,8 @@
     el.successPanel.hidden = false;
     if (output.gradedCount > 0) {
       el.successScore.textContent = `${formatNumber(output.earnedPoints)} / ${formatNumber(output.totalPossiblePoints)}`;
-      el.successDetail.textContent = `正确 ${output.correctCount}/${output.gradedCount}，识别 ${output.recognizedCount}/55，${output.scorePercent.toFixed(1)}%。`;
+      const prefix = output.sheetValidation && output.sheetValidation.lowConfidence ? "低置信度，请人工抽查；" : "";
+      el.successDetail.textContent = `${prefix}正确 ${output.correctCount}/${output.gradedCount}，识别 ${output.recognizedCount}/55，${output.scorePercent.toFixed(1)}%。`;
     } else {
       el.successScore.textContent = `${output.recognizedCount}/55`;
       el.successDetail.textContent = "未配置标答，仅显示识别题数。";
@@ -980,6 +987,16 @@
       problems.push("选择框网格没有对齐");
     }
 
+    const moderateGrid = grid.questionCoverage >= 0.48 && grid.boxCoverage >= 0.34;
+    const framedWeakGrid = frame.count >= 3 && grid.questionCoverage >= 0.42 && grid.boxCoverage >= 0.34 && darkFraction <= 0.32;
+    const lowConfidenceAccept = output.recognizedCount >= 54
+      && pageMean >= 118
+      && veryDarkFraction <= 0.24
+      && darkFraction <= 0.42
+      && grid.averageScore >= 0.07
+      && (moderateGrid || framedWeakGrid)
+      && (frame.count >= 2 || frame.score >= 0.50 || grid.questionCoverage >= 0.58);
+
     const score = clamp((pageMean - 120) / 80, 0, 1.4)
       + clamp((0.42 - darkFraction) * 3.0, -1.0, 1.2)
       + frame.score
@@ -990,7 +1007,8 @@
 
     const summary = `亮度 ${pageMean.toFixed(0)}，暗区 ${(darkFraction * 100).toFixed(0)}%，边框 ${frame.count}/4，网格 ${(grid.questionCoverage * 100).toFixed(0)}%，框 ${(grid.boxCoverage * 100).toFixed(0)}%，识别 ${output.recognizedCount}/55`;
     return {
-      valid: problems.length === 0,
+      valid: problems.length === 0 || lowConfidenceAccept,
+      lowConfidence: problems.length > 0 && lowConfidenceAccept,
       problems,
       score,
       pageMean,
